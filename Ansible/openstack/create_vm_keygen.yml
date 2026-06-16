@@ -1,1 +1,32 @@
+---
+- name: Create VM in OpenStack
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Create OpenStack keypair
+      openstack.cloud.keypair:
+        cloud: myopenstack
+        state: present
+        name: hemanth-key
+        public_key_file: /var/lib/awx/.ssh/openstack_ecdsa.pub
 
+    - name: Create VM
+      openstack.cloud.server:
+        cloud: myopenstack
+        state: present
+        name: test-hemanth
+        image: cirros-0.6.3-x86_64-disk
+        flavor: m1.tiny
+        network: shared
+        key_name: hemanth-key
+        auto_floating_ip: false
+      register: vm_create
+
+    - name: Assigning the Floating IP
+      openstack.cloud.floating_ip:
+        cloud: myopenstack
+        state: present
+        floating_ip_address: 172.24.4.72
+        server: test-hemanth
+        network: public
+        
