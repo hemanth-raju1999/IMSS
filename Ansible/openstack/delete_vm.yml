@@ -1,0 +1,23 @@
+---
+- name: Delete VM
+  hosts: localhost
+  gather_facts: false
+  vars:
+    floating_ip: 172.24.4.72
+  tasks:
+    - name: Delete Floating IP associated with this
+      openstack.cloud.floating_ip:
+        cloud: myopenstack
+        state: absent
+        floating_ip_address: "{{ floating_ip }}"
+        server: test-hemanth
+        network: public
+
+    - name: Remove VM
+      openstack.cloud.server:
+        cloud: myopenstack
+        state: absent
+        name: test-hemanth
+
+    - name: Delete floating IP allocation
+      shell: openstack --os-cloud myopenstack floating ip delete "{{ floating_ip }}"
