@@ -1,0 +1,62 @@
+---
+- name: Create memory report and URL
+  hosts: hyperlink
+  gather_facts: yes
+  vars:
+    email_username: venkatahemanth.raju@imss.co.in
+    email_password: jVs%82eHa
+  tasks:
+    - name: Get memory information
+      command: lsblk
+      register: memory_info
+
+    - name: Create reports directory
+      file:
+        path: /var/www/html/reports
+        state: directory
+        mode: '0755'
+
+    - name: Create HTML report
+      copy:
+        dest: "/var/www/html/reports/{{ inventory_hostname }}_memory.html"
+        content: |
+          <html>
+          <head>
+              <title>Memory Report - {{ inventory_hostname }}</title>
+          </head>
+          <body>
+              <h2>Memory Report for {{ inventory_hostname }}</h2>
+              <pre>
+                   {{ memory_info.stdout }}
+              </pre>
+          </body>
+          </html>
+
+    - name: add headers
+      delegate_to: localhost
+      shell: echo "IPAddress, URL" > /var/lib/awx/projects/hemanth/hyperlink.csv
+
+    - name: Add entry to CSV
+      lineinfile:
+        path: /var/lib/awx/projects/hemanth/hyperlink.csv
+        create: yes
+        line: '{{ inventory_hostname }},"=HYPERLINK(""http://{{ inventory_hostname }}/reports/{{ inventory_hostname }}_memory.html"",""View Report"")"'
+      delegate_to: localhost
+
+    - name:  Alert
+      delegate_to: localhost
+      run_once: true
+      mail:
+        host: smtp.zoho.in
+        port: 465
+        username: "{{ email_username }}"
+        password: "{{ email_password }}"
+        from: Hemanth Raju Vysyaraju Venkata <venkatahemanth.raju@imss.co.in>
+        to: Hemanth Raju Vysyaraju Venkata <venkatahemanth.raju@imss.co.in>
+        subject: Hyperlink
+        body:
+         Hi Team
+
+         Please find the hyperlink report
+
+        attach: /var/lib/awx/projects/hemanth/hyperlink.csv
