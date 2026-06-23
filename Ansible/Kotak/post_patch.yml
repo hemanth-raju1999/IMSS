@@ -1,0 +1,113 @@
+---
+- name: Refresh post patch table every run
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - vars/db_vars.yml
+
+  vars:
+    win_base_path: "C:\\Temp\\LatestDownloads"
+    win_sep: "\\"
+
+  tasks:
+
+  # ---------------------------------------------------------
+  # CLEAR TABLE
+  # ---------------------------------------------------------
+  - name: Clear table
+    community.postgresql.postgresql_query:
+      db: "{{ login_db }}"
+      login_host: "{{ login_host }}"
+      login_user: "{{ login_user }}"
+      login_password: "{{ login_password }}"
+      query: "TRUNCATE TABLE post_patch_apps_status;"
+
+  # ---------------------------------------------------------
+  # INSERT PRE PATCH DATA
+  # ---------------------------------------------------------
+  - name: Insert pre patch rows
+    community.postgresql.postgresql_query:
+      db: "{{ login_db }}"
+      login_host: "{{ login_host }}"
+      login_user: "{{ login_user }}"
+      login_password: "{{ login_password }}"
+      query: |
+        INSERT INTO post_patch_apps_status
+        (app_name, pre_patch_version, ip)
+        VALUES
+        ('{{ item.app_name }}',
+         '{{ item.app_version_before_update }}',
+         '{{ item.ip }}');
+    loop: "{{ pre_patch_windows_apps }}"
+
+  # ---------------------------------------------------------
+  # UPDATE POST PATCH VERSION + PATH
+  # ---------------------------------------------------------
+  - name: Update post patch version and installed path
+    community.postgresql.postgresql_query:
+      db: "{{ login_db }}"
+      login_host: "{{ login_host }}"
+      login_user: "{{ login_user }}"
+      login_password: "{{ login_password }}"
+      query: |
+        UPDATE post_patch_apps_status p
+        SET
+          post_patch_version = '{{ item.app_version_after_update }}',
+          installed_path =
+          CASE
+            WHEN src.latest_path IS NOT NULL AND src.latest_path != '' THEN
+              '{{ win_base_path }}' || '{{ win_sep }}' ||
+              split_part(
+                src.latest_path,
+                '/',
+                array_length(string_to_array(src.latest_path,'/'),1)
+              )
+            ELSE NULL
+          END
+        FROM (
+          VALUES
+          ('Google Chrome','{{ chrome.latest_download_path | default("") }}'),
+          ('NodeJS','{{ nodejs.latest_download_path | default("") }}'),
+          ('Notepad++','{{ notepadpp.latest_download_path | default("") }}')
+        ) AS src(app_name, latest_path)
+        WHERE p.app_name = src.app_name
+        AND p.app_name='{{ item.app_name }}'
+        AND p.ip='{{ item.ip }}';
+    loop: "{{ post_patch_windows_apps }}"
+
+  # ---------------------------------------------------------
+  # UPDATE STATUS
+  # ---------------------------------------------------------
+  - name: Update status
+    community.postgresql.postgresql_query:
+      db: "{{ login_db }}"
+      login_host: "{{ login_host }}"
+      login_user: "{{ login_user }}"
+      login_password: "{{ login_password }}"
+      query: |
+        UPDATE post_patch_apps_status
+        SET status =
+        CASE
+          WHEN post_patch_version IS NULL THEN 'NA'
+          WHEN pre_patch_version = post_patch_version THEN 'already in latest'
+          ELSE 'updated'
+        END;
+
+  # ---------------------------------------------------------
+  # DATE
+  # ---------------------------------------------------------
+  - name: Get date
+    command: date +"%Y-%m-%d"
+    register: d
+    changed_when: false
+
+  - name: Update date
+    community.postgresql.postgresql_query:
+      db: "{{ login_db }}"
+      login_host: "{{ login_host }}"
+      login_user: "{{ login_user }}"
+      login_password: "{{ login_password }}"
+      query: |
+        UPDATE post_patch_apps_status
+        SET installed_date='{{ d.stdout }}';

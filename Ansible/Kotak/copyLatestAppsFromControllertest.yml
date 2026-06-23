@@ -1,0 +1,172 @@
+---
+- name: Install required latest applications on Windows hosts
+  hosts: windows
+  gather_facts: false
+
+  vars:
+    windows_temp_dir: C:\Temp\LatestDownloads
+
+  tasks:
+
+    ####################################################################
+    # Bring comparison data from localhost into Windows hosts (AWX FIX)
+    ####################################################################
+    - name: Import comparison data from localhost
+      ansible.builtin.set_fact:
+        comparison: "{{ hostvars['localhost'].comparison }}"
+
+    - name: Alias comparison variables
+      ansible.builtin.set_fact:
+        update_required_apps: "{{ comparison.update_required_apps }}"
+        latest_app_paths: "{{ comparison.latest_app_paths }}"
+
+    - name: DEBUG update_required_apps
+      ansible.builtin.debug:
+        var: update_required_apps
+
+    ####################################################################
+    # Normalize update_required_apps (extract app names only)
+    ####################################################################
+    - name: Build apps_to_update list (normalized)
+      ansible.builtin.set_fact:
+        apps_to_update_norm: >-
+          {{
+            update_required_apps
+            | map('regex_replace', '\s*\(.*$', '')
+            | map('lower')
+            | map('regex_replace', '[^a-z0-9]', '')
+            | list
+            | unique
+          }}
+
+    - name: DEBUG normalized apps_to_update
+      ansible.builtin.debug:
+        var: apps_to_update_norm
+
+    ####################################################################
+    # Select apps applicable to THIS host only
+    ####################################################################
+    - name: Initialize host apps list
+      ansible.builtin.set_fact:
+        host_apps_to_update: []
+
+    - name: Select apps for this Windows host
+      ansible.builtin.set_fact:
+        host_apps_to_update: "{{ host_apps_to_update + [item] }}"
+      loop: "{{ pre_patch_windows_apps }}"
+      when:
+        - item.ip in [inventory_hostname, ansible_host | default('')]
+        - (
+            item.app_name
+            | lower
+            | regex_replace('[^a-z0-9]', '')
+          ) in apps_to_update_norm
+
+    - name: DEBUG apps selected for this host
+      ansible.builtin.debug:
+        var: host_apps_to_update
+
+    ####################################################################
+    # Stop early if nothing to update on this host
+    ####################################################################
+    - name: No applications to update on this host
+      ansible.builtin.debug:
+        msg: "No applications need update on this host."
+      when: host_apps_to_update | length == 0
+
+    - name: Stop play for this host
+      ansible.builtin.meta: end_host
+      when: host_apps_to_update | length == 0
+
+    ####################################################################
+    # Prepare Windows host
+    ####################################################################
+    - name: Ensure temp directory exists
+      ansible.windows.win_file:
+        path: "{{ windows_temp_dir }}"
+        state: directory
+
+    ####################################################################
+    # Normalize installer paths
+    ####################################################################
+    - name: Initialize normalized installer map
+      ansible.builtin.set_fact:
+        latest_app_paths_norm: {}
+
+    - name: Build normalized installer map
+      ansible.builtin.set_fact:
+        latest_app_paths_norm: >-
+          {{
+            latest_app_paths_norm | combine({
+              (item.key | lower | regex_replace('[^a-z0-9]', '')): item.value
+            })
+          }}
+      loop: "{{ latest_app_paths | dict2items }}"
+
+    - name: DEBUG normalized installer paths
+      ansible.builtin.debug:
+        var: latest_app_paths_norm
+
+    ####################################################################
+    # Copy installers
+    ####################################################################
+    - name: Copy installers to Windows host
+      ansible.windows.win_copy:
+        src: >-
+          {{
+            latest_app_paths_norm[
+              item.app_name | lower | regex_replace('[^a-z0-9]', '')
+            ]
+          }}
+        dest: >-
+          {{ windows_temp_dir }}\{{
+            latest_app_paths_norm[
+              item.app_name | lower | regex_replace('[^a-z0-9]', '')
+            ] | basename
+          }}
+      loop: "{{ host_apps_to_update }}"
+      loop_control:
+        label: "{{ item.app_name }}"
+      when:
+        - latest_app_paths_norm[
+            item.app_name | lower | regex_replace('[^a-z0-9]', '')
+          ] is defined
+
+    ####################################################################
+    # Install applications silently
+    ####################################################################
+    - name: Install applications (silent)
+      ansible.windows.win_package:
+        path: >-
+          {{ windows_temp_dir }}\{{
+            latest_app_paths_norm[
+              item.app_name | lower | regex_replace('[^a-z0-9]', '')
+            ] | basename
+          }}
+        state: present
+        arguments: >-
+          {{
+            '/S'
+            if
+            (
+              latest_app_paths_norm[
+                item.app_name | lower | regex_replace('[^a-z0-9]', '')
+              ] | lower
+            ).endswith('.exe')
+            else
+            '/qn /norestart'
+          }}
+      loop: "{{ host_apps_to_update }}"
+      loop_control:
+        label: "{{ item.app_name }}"
+
+    ####################################################################
+    # Summary
+    ####################################################################
+    - name: Installation summary
+      ansible.builtin.debug:
+        msg: "Installed application: {{ item.app_name }}"
+      loop: "{{ host_apps_to_update }}"
+      loop_control:
+        label: "{{ item.app_name }}"
+

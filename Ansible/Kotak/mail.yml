@@ -1,0 +1,124 @@
+---
+- name: Compare versions and decide approval
+  hosts: localhost
+  gather_facts: no
+
+  tasks:
+
+  # ---------------------------------------------------------
+  # BUILD LATEST VERSION MAP
+  # ---------------------------------------------------------
+  - name: Create latest version lookup
+    set_fact:
+      latest_map:
+        Chrome: "{{ chrome.latest_version }}"
+        NodeJS: "{{ nodejs.latest_version }}"
+        "Notepad++": "{{ notepadpp.latest_version }}"
+
+  # ---------------------------------------------------------
+  # NORMALIZE APP NAMES
+  # ---------------------------------------------------------
+  - name: Normalize app names
+    set_fact:
+      normalized_list: "{{ normalized_list | default([]) + [ new_item ] }}"
+    vars:
+      new_item: >-
+        {{
+          item | combine({
+            'normalized_name':
+            (
+              'Chrome' if 'Chrome' in item.app_name else
+              'NodeJS' if 'Node' in item.app_name else
+              'Notepad++' if 'Notepad++' in item.app_name else
+              'OTHER'
+            )
+          })
+        }}
+    loop: "{{ pre_patch_windows_apps }}"
+
+  # ---------------------------------------------------------
+  # COMPARE VERSIONS
+  # ---------------------------------------------------------
+  - name: Compare versions
+    set_fact:
+      comparison_results: "{{ comparison_results | default([]) + [ result ] }}"
+    vars:
+      latest_version: "{{ latest_map[item.normalized_name] | default('0') }}"
+      current_version: "{{ item.app_version_before_update | default('0') }}"
+
+      result: >-
+        {{
+          {
+            'hostname': item.hostname,
+            'ip': item.ip,
+            'app': item.normalized_name,
+            'current_version': current_version,
+            'latest_version': latest_version,
+            'version_diff':
+              ((latest_version.split('.')[0] | int)
+              - (current_version.split('.')[0] | int)),
+            'massive_update':
+              (((latest_version.split('.')[0] | int)
+              - (current_version.split('.')[0] | int)) >= 2)
+          }
+        }}
+    when: item.normalized_name != "OTHER"
+    loop: "{{ normalized_list }}"
+
+  # ---------------------------------------------------------
+  # PRINT RESULT
+  # ---------------------------------------------------------
+  - name: Show comparison
+    debug:
+      msg: >
+        Server={{ item.hostname }} ({{ item.ip }})
+        App={{ item.app }}
+        Current={{ item.current_version }}
+        Latest={{ item.latest_version }}
+        Diff={{ item.version_diff }}
+    loop: "{{ comparison_results }}"
+
+  # ---------------------------------------------------------
+  # FAIL PLAYBOOK IF DIFF > 1  (NEW TASK ADDED)
+  # ---------------------------------------------------------
+  - name: Fail if version difference greater than 1
+    fail:
+      msg: >
+        ❌ Version gap too high.
+        Server={{ item.hostname }} ({{ item.ip }})
+        App={{ item.app }}
+        Current={{ item.current_version }}
+        Latest={{ item.latest_version }}
+        Diff={{ item.version_diff }}
+    loop: "{{ comparison_results }}"
+    when: item.version_diff | int > 1
+
+  # ---------------------------------------------------------
+  # MASSIVE UPDATE CHECK
+  # ---------------------------------------------------------
+  - name: Detect massive updates
+    set_fact:
+      massive_updates: "{{ comparison_results | selectattr('massive_update','equalto',true) | list }}"
+
+  - name: Approval required message
+    debug:
+      msg: |
+        🚨 MASSIVE UPDATE DETECTED 🚨
+        Approval required before patching.
+        {{ massive_updates }}
+    when: massive_updates | length > 0
+
+  - name: Safe message
+    debug:
+      msg: "All servers safe. Continue patch."
+    when: massive_updates | length == 0
+
+  # ---------------------------------------------------------
+  # SEND TO WORKFLOW
+  # ---------------------------------------------------------
+  - name: Set workflow stats
+    set_stats:
+      data:
+        approval_required: "{{ massive_updates | length > 0 }}"
+        comparison_results: "{{ comparison_results }}"
+

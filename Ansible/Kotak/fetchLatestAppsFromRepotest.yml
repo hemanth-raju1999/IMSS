@@ -1,0 +1,42 @@
+---
+- name: Fetch latest application installers from repo server to controller
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    repo_host: 172.16.3.102
+
+  tasks:
+
+    - name: Fail if latest_app_paths is not provided
+      ansible.builtin.fail:
+        msg: "latest_app_paths variable is not provided from previous job."
+      when: latest_app_paths is not defined
+
+    - name: DEBUG - received latest_app_paths
+      ansible.builtin.debug:
+        var: latest_app_paths
+
+    - name: Ensure destination directories exist on controller
+      ansible.builtin.file:
+        path: "{{ item.value | dirname }}"
+        state: directory
+        mode: '0755'
+      loop: "{{ latest_app_paths | dict2items }}"
+
+    - name: Check if file already exists on controller
+      ansible.builtin.stat:
+        path: "{{ item.value }}"
+      register: controller_files
+      loop: "{{ latest_app_paths | dict2items }}"
+
+    - name: Fetch latest application installers (only if not present on controller)
+      ansible.builtin.fetch:
+        src: "{{ item.item.value }}"
+        dest: "{{ item.item.value | dirname }}/"
+        flat: yes
+      when: not item.stat.exists
+      delegate_to: "{{ repo_host }}"
+      become: yes
+      loop: "{{ controller_files.results }}"
+

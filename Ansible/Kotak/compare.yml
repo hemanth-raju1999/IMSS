@@ -1,0 +1,243 @@
+---
+- name: Compare pre_fetch apps with latest downloaded versions (DB based)
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - vars/db_vars.yml
+
+  tasks:
+
+    ##################################################################
+    # Read downloaded inventory from DB
+    ##################################################################
+    - name: Read downloaded applications from DB
+      community.postgresql.postgresql_query:
+        login_host: "{{ login_host }}"
+        login_user: "{{ login_user }}"
+        login_password: "{{ login_password }}"
+        login_db: "{{ login_db }}"
+        query: |
+          SELECT
+            app_name,
+            app_version,
+            downloaded_path
+          FROM appdownloaddetails_copy
+          WHERE downloaded_path <> 'UNSUPPORTED'
+      register: downloaded_apps
+
+
+    ##################################################################
+    # Read pre-patch applications from DB
+    ##################################################################
+    - name: Read pre-patch applications from DB
+      community.postgresql.postgresql_query:
+        login_host: "{{ login_host }}"
+        login_user: "{{ login_user }}"
+        login_password: "{{ login_password }}"
+        login_db: "{{ login_db }}"
+        query: |
+          SELECT
+            app_name,
+            app_version,
+            ip,
+            hostname
+          FROM pre_patch_windows_apps
+      register: prepatch_apps
+
+
+    ##################################################################
+    # Normalize downloaded apps
+    ##################################################################
+    - name: Initialize normalized downloaded apps
+      set_fact:
+        downloaded_apps_normalized: []
+
+    - name: Normalize downloaded application names
+      set_fact:
+        downloaded_apps_normalized: >-
+          {{
+            downloaded_apps_normalized + [
+              {
+                'norm_name':
+                  (
+                    item.app_name
+                    | lower
+                    | regex_replace('[^a-z0-9]', '')
+                  ),
+                'display_name': item.app_name,
+                'version': (item.app_version | trim),
+                'downloaded_path': item.downloaded_path
+              }
+            ]
+          }}
+      loop: "{{ downloaded_apps.query_result }}"
+
+
+    ##################################################################
+    # Build latest version map
+    ##################################################################
+    - name: Initialize latest_versions map
+      set_fact:
+        latest_versions: {}
+
+    - name: Build latest version map
+      set_fact:
+        latest_versions: >-
+          {{
+            latest_versions | combine({
+              item.norm_name:
+                (
+                  item.version
+                  if latest_versions[item.norm_name] is not defined
+                  else
+                  (
+                    item.version
+                    if item.version is version(latest_versions[item.norm_name], '>')
+                    else latest_versions[item.norm_name]
+                  )
+                )
+            })
+          }}
+      loop: "{{ downloaded_apps_normalized }}"
+
+
+    ##################################################################
+    # Build latest app path map
+    ##################################################################
+    - name: Initialize latest app path map
+      set_fact:
+        latest_app_paths: {}
+
+    - name: Build latest app path map
+      set_fact:
+        latest_app_paths: >-
+          {{
+            latest_app_paths | combine({
+              item.display_name: item.downloaded_path
+            })
+          }}
+      loop: "{{ downloaded_apps_normalized }}"
+      when:
+        - item.norm_name in latest_versions
+        - item.version is version(latest_versions[item.norm_name], '==')
+
+
+    ##################################################################
+    # Initialize result lists
+    ##################################################################
+    - name: Initialize result lists
+      set_fact:
+        latest_apps: []
+        update_required_apps: []
+        missing_apps: []
+
+
+    ##################################################################
+    # Classify pre-patch applications (DISPLAY FIX APPLIED HERE)
+    ##################################################################
+    - name: Classify pre_fetch applications
+      set_fact:
+        latest_apps: "{{ latest_apps + latest_add }}"
+        update_required_apps: "{{ update_required_apps + update_add }}"
+        missing_apps: "{{ missing_apps + missing_add }}"
+      vars:
+        normalized_name: "{{ item.app_name | lower | regex_replace('[^a-z0-9]', '') }}"
+        current_version: "{{ item.app_version | trim }}"
+        latest_version: "{{ latest_versions.get(normalized_name, '') | trim }}"
+        ip_addr: "{{ item.ip }}"
+
+        # 🔥 Clean display name (removes (64-bit x64) etc.)
+        display_name: >-
+          {{
+            item.app_name
+            | regex_replace('\\s*\\(.*?\\)', '')
+          }}
+
+        latest_add: >-
+          {{
+            [ display_name ~ ' (' ~ ip_addr ~ ') ' ~ current_version ]
+            if (
+              normalized_name in latest_versions and
+              current_version is version(latest_version, '==')
+            )
+            else []
+          }}
+
+        update_add: >-
+          {{
+            [
+              display_name ~ ' (' ~ ip_addr ~ ') ' ~ current_version ~
+              ' (latest: ' ~ latest_version ~ ')'
+            ]
+            if (
+              normalized_name in latest_versions and
+              current_version is version(latest_version, '<')
+            )
+            else []
+          }}
+
+        missing_add: >-
+          {{
+            [ display_name ~ ' (' ~ ip_addr ~ ') ' ~ current_version ]
+            if normalized_name not in latest_versions
+            else []
+          }}
+      loop: "{{ prepatch_apps.query_result }}"
+
+
+    ##################################################################
+    # Show results
+    ##################################################################
+    - name: List apps on latest version
+      debug:
+        var: latest_apps
+
+    - name: List apps needing update
+      debug:
+        var: update_required_apps
+
+    - name: List apps missing from downloaded inventory
+      debug:
+        var: missing_apps
+
+
+    ##################################################################
+    # Build current vs latest map
+    ##################################################################
+    - name: Initialize version map
+      set_fact:
+        current_vs_latest: {}
+
+    - name: Build current vs latest map
+      set_fact:
+        current_vs_latest: >-
+          {{
+            current_vs_latest | combine({
+              app_name: {
+                'current': current_ver,
+                'latest': latest_ver
+              }
+            })
+          }}
+      vars:
+        app_name: "{{ item | regex_replace('\\s*\\(.*?\\)\\s*[0-9].*$', '') }}"
+        current_ver: "{{ item | regex_search('\\)\\s*([0-9]+\\.[0-9\\.]+)', '\\1') }}"
+        latest_ver: "{{ item | regex_search('latest:\\s*([0-9\\.]+)', '\\1') }}"
+      loop: "{{ update_required_apps }}"
+
+
+    ##################################################################
+    # Persist stats
+    ##################################################################
+    - name: Persist comparison stats
+      set_stats:
+        data:
+          comparison:
+            latest_apps: "{{ latest_apps }}"
+            update_required_apps: "{{ update_required_apps }}"
+            missing_apps: "{{ missing_apps }}"
+            current_vs_latest: "{{ current_vs_latest }}"
+            latest_versions: "{{ latest_versions }}"
+            latest_app_paths: "{{ latest_app_paths }}"
+

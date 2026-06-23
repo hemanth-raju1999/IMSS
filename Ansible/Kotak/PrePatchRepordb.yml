@@ -1,0 +1,48 @@
+- name: Minimal PostgreSQL insert (no duplicates)
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  vars_files:
+    - vars/db_vars.yml
+
+  tasks:
+    - name: Delete all rows from pre_patch_windows_apps
+      delegate_to: localhost
+      community.postgresql.postgresql_query:
+        login_host: "{{ login_host }}"
+        login_user: "{{ login_user }}"
+        login_password: "{{ login_password }}"
+        login_db: "{{ login_db }}"
+        query: |
+          TRUNCATE TABLE pre_patch_windows_apps;
+
+    - name: Insert data only if not exists
+      community.postgresql.postgresql_query:
+        login_host: "{{ login_host }}"
+        login_db: "{{ login_db }}"
+        login_user: "{{ login_user }}"
+        login_password: "{{ login_password }}"
+        query: |
+          INSERT INTO pre_patch_windows_apps
+            (app_name, app_version, windows_version, ip, hostname)
+          SELECT %s, %s, %s, %s, %s
+          WHERE NOT EXISTS (
+            SELECT 1 FROM pre_patch_windows_apps
+            WHERE app_name = %s
+              AND app_version = %s
+              AND ip = %s
+              AND hostname = %s
+          );
+        positional_args:
+          - "{{ item.app_name }}"
+          - "{{ item.app_version_before_update }}"
+          - "{{ item.windows_version | regex_replace(\"\\[|'|\\]\", '') }}"
+          - "{{ item.ip }}"
+          - "{{ item.hostname }}"
+          - "{{ item.app_name }}"
+          - "{{ item.app_version_before_update }}"
+          - "{{ item.ip }}"
+          - "{{ item.hostname }}"
+      loop: "{{ pre_patch_windows_apps }}"
+

@@ -1,0 +1,84 @@
+---
+- name: Fetch latest app versions (based on highest version only)
+  hosts: localhost
+  gather_facts: false
+
+  vars_files:
+    - vars/db_vars.yml
+
+  tasks:
+
+  ############################################################
+  # FETCH LATEST VERSION BASED ONLY ON VERSION NUMBER
+  ############################################################
+  - name: Fetch latest app details (highest version only)
+    community.postgresql.postgresql_query:
+      db: "{{ login_db }}"
+      login_user: "{{ login_user }}"
+      login_password: "{{ login_password }}"
+      login_host: "{{ login_host }}"
+      login_port: 5432
+      query: |
+        SELECT app_name, app_version, downloaded_path
+        FROM (
+            SELECT DISTINCT ON (app_name)
+                app_name,
+                app_version,
+                downloaded_path
+            FROM appdownloaddetails_copy
+            WHERE downloaded_path IS NOT NULL
+              AND downloaded_path != 'UNSUPPORTED'
+            ORDER BY app_name,
+                     string_to_array(app_version, '.')::int[] DESC
+        ) t;
+    register: latest_apps
+
+  - debug:
+      var: latest_apps.query_result
+
+  ############################################################
+  # EXTRACT EACH APP SAFELY
+  ############################################################
+  - name: Extract Chrome
+    set_fact:
+      chrome_row: >-
+        {{ latest_apps.query_result
+           | selectattr('app_name','equalto','Google Chrome')
+           | list | first | default({}) }}
+
+  - name: Extract NodeJS
+    set_fact:
+      node_row: >-
+        {{ latest_apps.query_result
+           | selectattr('app_name','equalto','NodeJS')
+           | list | first | default({}) }}
+
+  - name: Extract Notepad++
+    set_fact:
+      notepad_row: >-
+        {{ latest_apps.query_result
+           | selectattr('app_name','equalto','Notepad++')
+           | list | first | default({}) }}
+
+  ############################################################
+  # SET STATS FOR WORKFLOW
+  ############################################################
+  - name: Set stats for workflow
+    set_stats:
+      data:
+
+        chrome:
+          application_name: "Google Chrome"
+          latest_version: "{{ chrome_row.app_version | default('') }}"
+          latest_download_path: "{{ chrome_row.downloaded_path | default('') }}"
+
+        nodejs:
+          application_name: "NodeJS"
+          latest_version: "{{ node_row.app_version | default('') }}"
+          latest_download_path: "{{ node_row.downloaded_path | default('') }}"
+
+        notepadpp:
+          application_name: "Notepad++"
+          latest_version: "{{ notepad_row.app_version | default('') }}"
+          latest_download_path: "{{ notepad_row.downloaded_path | default('') }}"
+

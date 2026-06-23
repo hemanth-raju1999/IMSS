@@ -1,0 +1,123 @@
+---
+- name: Collect installed applications from Windows
+  hosts: windows
+  gather_facts: no
+
+  tasks:
+
+  # ---------------------------------------------------------
+  # GET WINDOWS VERSION
+  # ---------------------------------------------------------
+  - name: Get Windows OS name
+    ansible.windows.win_shell: |
+      (Get-WmiObject Win32_OperatingSystem).Caption
+    register: win_version
+
+  # ---------------------------------------------------------
+  # COLLECT APPS FROM REGISTRY
+  # ---------------------------------------------------------
+  - name: Collect installed applications
+    ansible.windows.win_shell: |
+      $apps = @()
+
+      $registryPaths = @(
+        'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+      )
+
+      $hostname = $env:COMPUTERNAME
+
+      try {
+        $ip = (Get-WmiObject Win32_NetworkAdapterConfiguration |
+              Where-Object {$_.IPEnabled} |
+              Select-Object -First 1 -ExpandProperty IPAddress)[0]
+      } catch { $ip = "unknown" }
+
+      foreach ($path in $registryPaths) {
+        $items = Get-ItemProperty -Path $path -ErrorAction SilentlyContinue
+
+        foreach ($item in $items) {
+          if ($item.DisplayName) {
+            $apps += [PSCustomObject]@{
+              app_name = $item.DisplayName
+              app_version_after_update = $item.DisplayVersion
+              hostname = $hostname
+              ip = $ip
+            }
+          }
+        }
+      }
+
+      $apps | ConvertTo-Json -Depth 4
+    register: win_apps_raw
+
+  # ---------------------------------------------------------
+  # PARSE JSON
+  # ---------------------------------------------------------
+  - name: Parse JSON
+    set_fact:
+      windows_apps: "{{ win_apps_raw.stdout | from_json | default([]) }}"
+
+  - name: Ensure list
+    set_fact:
+      windows_apps: "[{{ windows_apps }}]"
+    when: windows_apps is mapping
+
+  # ---------------------------------------------------------
+  # NORMALIZE ALL APP NAMES
+  # ---------------------------------------------------------
+  - name: Normalize app names
+    set_fact:
+      windows_apps_normalized: "{{ windows_apps_normalized | default([]) + [ normalized_item ] }}"
+    vars:
+      normalized_name: >-
+        {% set name = item.app_name | lower %}
+
+        {% if 'notepad++' in name %}
+        Notepad++
+        {% elif 'chrome' in name %}
+        Chrome
+        {% elif 'node.js' in name or 'nodejs' in name %}
+        NodeJS
+        {% else %}
+        {{ item.app_name }}
+        {% endif %}
+
+      normalized_item: >-
+        {{
+          item | combine({
+            'app_name': normalized_name | trim
+          })
+        }}
+    loop: "{{ windows_apps }}"
+
+  - name: Replace with normalized list
+    set_fact:
+      windows_apps: "{{ windows_apps_normalized }}"
+
+  # ---------------------------------------------------------
+  # ADD OS NAME
+  # ---------------------------------------------------------
+  - name: Add OS name
+    set_fact:
+      windows_apps: >-
+        {{
+          windows_apps
+          | map('combine', {'windows_version': win_version.stdout | trim })
+          | list
+        }}
+
+  # ---------------------------------------------------------
+  # DEBUG OUTPUT
+  # ---------------------------------------------------------
+  - debug:
+      msg: "{{ item }}"
+    loop: "{{ windows_apps }}"
+
+  # ---------------------------------------------------------
+  # SAVE TO WORKFLOW (ONLY CHANGE HERE)
+  # ---------------------------------------------------------
+  - set_stats:
+      data:
+        post_patch_windows_apps: "{{ windows_apps }}"
+
