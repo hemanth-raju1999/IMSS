@@ -1,0 +1,34 @@
+---
+- name: Download Chrome, NodeJS and Notepad++
+  hosts: 172.16.3.102
+  gather_facts: yes
+
+  vars:
+    csv_file: "/tmp/downloadedAppDetailsReport.csv"
+
+  tasks:
+
+    - name: Initialize CSV file
+      include_tasks: tasks/init_csv.yml
+
+    - name: Include Chrome download tasks
+      include_tasks: tasks/chromeDownload.yml
+      vars:
+        repo_dir: "/tmp/Chrome"
+        api_versions_url: "https://versionhistory.googleapis.com/v1/chrome/platforms/win64/channels/stable/versions"
+        chrome_msi_url: "https://dl.google.com/chrome/install/GoogleChromeStandaloneEnterprise64.msi"
+        chrome_msi_name: "GoogleChromeEnterprise64.msi"
+
+    - name: Include NodeJS download tasks
+      include_tasks: tasks/nodejsDownload.yml
+      vars:
+        repo_dir: "/tmp/NodeJS"
+        download_url: "https://nodejs.org/dist"
+        ansible_remote_tmp: /tmp/.ansible/tmp
+        versions_list: "https://nodejs.org/dist/index.json"
+
+    - name: Include Notepad++ download tasks
+      include_tasks: tasks/notepadppDownload.yml
+      vars:
+        repo_dir: "/tmp/Notepadpp"
+        npp_api_url: "https://api.github.com/repos/notepad-plus-plus/notepad-plus-plus/releases?per_page=100"
