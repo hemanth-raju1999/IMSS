@@ -8,4 +8,4 @@
     - name: Start VM
       virt:
         name: "{{ vm_name }}"
-        state: shutdown
+        state: shutdown ##############change parameter according to the requried state
