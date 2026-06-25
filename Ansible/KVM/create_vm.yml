@@ -1,0 +1,42 @@
+---
+- name: Create VM on KVM
+  hosts: kvm_host
+  become: true
+
+  vars:
+    vm_name: rhel9-test
+    vm_ram_mb: 4096
+    vm_vcpus: 2
+    vm_disk_size_gb: 20
+    vm_disk_path: "/var/lib/libvirt/images/{{ vm_name }}.qcow2"
+
+  tasks:
+
+    - name: Create VM disk
+      command:
+        cmd: >
+          qemu-img create -f qcow2
+          {{ vm_disk_path }}
+          {{ vm_disk_size_gb }}G
+      args:
+        creates: "{{ vm_disk_path }}"
+
+    - name: Define VM
+      community.libvirt.virt:
+        command: define
+        xml: "{{ lookup('template', 'templates/vm.xml.j2') }}"
+
+    - name: Start VM
+      community.libvirt.virt:
+        name: "{{ vm_name }}"
+        state: running
+
+    - name: Check VM status
+      community.libvirt.virt:
+        name: "{{ vm_name }}"
+        command: status
+      register: vm_status
+
+    - debug:
+        var: vm_status
+        
