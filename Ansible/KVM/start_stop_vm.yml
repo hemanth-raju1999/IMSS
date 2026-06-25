@@ -1,0 +1,11 @@
+---
+- name: Check VM Status in KVM
+  hosts: kvm_host
+  become: true
+  vars:
+    vm_name: rhel9
+  tasks:
+    - name: Start VM
+      virt:
+        name: "{{ vm_name }}"
+        state: shutdown
