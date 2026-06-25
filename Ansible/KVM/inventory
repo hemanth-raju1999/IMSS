@@ -1,0 +1,8 @@
+[kvm_host]
+kvm01 ansible_host=172.16.3.15
+
+[kvm_host:vars]
+ansible_user=root
+ansible_password=Infra123$%^&
+ansible_become=true
+ansible_become_password=Infra123$%^&
