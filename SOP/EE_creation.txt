@@ -1,0 +1,126 @@
+creation of execution env
+[awx@controller1 execution-env]$ ll
+total 1388
+drwxr-xr-x. 2 awx awx      72 Apr  9 12:32 dependencies
+-rw-r--r--. 1 awx awx    1057 Apr  9 12:30 execution-environment.yml
+drwxr-xr-x. 2 awx awx      25 Apr  9 12:33 files
+[awx@controller1 execution-env]$
+
+-------------------------------------------------------------------------------------------------
+[awx@controller1 execution-env]$ cd dependencies
+[awx@controller1 dependencies]$ ll
+total 12
+-rw-r--r--. 1 awx awx 194 Apr  9 12:32 bindep.txt
+-rw-r--r--. 1 awx awx  42 Apr  9 12:29 requirements.txt
+-rw-r--r--. 1 awx awx 243 Apr  9 12:29 requirements.yml
+[awx@controller1 dependencies]$
+
+
+awx@controller1 dependencies]$ cat bindep.txt
+gcc [platform:rpm]
+python3-devel [platform:rpm]
+libffi-devel [platform:rpm]
+openssl-devel [platform:rpm]
+systemd-devel [platform:rpm]
+pkgconf-pkg-config [platform:rpm]
+krb5-devel [platform:rpm]
+
+[awx@controller1 dependencies]$ cat requirements.yml
+---
+collections:
+  - name: ansible.eda
+  - name: awx.awx
+  - name: community.general
+  - name: community.postgresql
+  - name: ansible.posix
+  - name: ansible.utils
+
+  # ✅ VMware collections
+  - name: vmware.vmware
+  - name: community.vmware
+
+[awx@controller1 dependencies]$ cat requirements.txt
+ansible-rulebook
+pyvmomi
+requests
+aiohttp
+
+[awx@controller1 execution-env]$ cat execution-environment.yml
+version: 3
+
+images:
+  base_image:
+    name: registry.redhat.io/ansible-automation-platform-24/ee-minimal-rhel9:latest
+
+options:
+  package_manager_path: /usr/bin/microdnf
+
+dependencies:
+  ansible_core:
+    package_pip: ansible-core~=2.15
+
+  ansible_runner:
+    package_pip: ansible-runner~=2.3
+
+  system: dependencies/bindep.txt
+  python: dependencies/requirements.txt
+  galaxy: dependencies/requirements.yml
+
+additional_build_files:
+  - src: files/ansible.cfg
+    dest: configs
+
+additional_build_steps:
+
+  prepend_base:
+    - RUN microdnf install -y python3-pip
+    - RUN pip3 install --upgrade pip setuptools wheel
+
+  prepend_galaxy:
+    - ADD _build/configs/ansible.cfg /etc/ansible/ansible.cfg
+
+  append_final:
+    - RUN pip3 install ansible-rulebook --upgrade
+
+    # ✅ (Optional but OK to keep)
+    - RUN mkdir -p /usr/share/ansible/collections/ansible_collections
+    - RUN ansible-galaxy collection install ansible.eda -p /usr/share/ansible/collections/ansible_collections --force
+
+    - ENV ANSIBLE_COLLECTIONS_PATHS=/usr/share/ansible/collections
+[awx@controller1 execution-env]$
+
+-----------------------------------------------------------------------------------------------------------------------------------
+[awx@controller1 execution-env]$ cd files/
+[awx@controller1 files]$ ll
+total 4
+-rw-r--r--. 1 awx awx 139 Apr  9 12:33 ansible.cfg
+[awx@controller1 files]$ cat ansible.cfg
+[defaults]
+host_key_checking = False
+collections_paths = /usr/share/ansible/collections:/usr/share/ansible/collections/ansible_collections
+[awx@controller1 files]$
+
+after this run this command 
+nohup ansible-builder build -t sonata_vmware:v01 -v 3 | tee build-out.txt
+then you will get contect directory
+
+
+------------------------------------------------------------------------------------------
+After creating exection env
+
+ 
+podman login registry.io
+podman images
+localhost/sonata_vmware
+podman tag localhost/eda_de_new:v1 hub.imss.com/eda_de_new:v1
+podman push hub.imss.com/eda_de_new:v1
+podman images
+hub.imss.com/eda_de_new
+
+if i want to push to anothor register
+podman login quay.io -u "swathi_nagarajaiah" -p "Khushi123;()78"
+podman tag hub.imss.com/eda_de_new:v1 quay.io/swathi_nagarajaiah/eda_de:v1
+podman push quay.io/swathi_nagarajaiah/eda_de:v1
+
+login registry in GUI and copy the image and paste in AAP -  EE
+
