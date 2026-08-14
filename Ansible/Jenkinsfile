@@ -1,0 +1,66 @@
+pipeline {
+    agent any
+
+    parameters {
+        string(name: 'AAP_TEMPLATE_ID', defaultValue: '32', description: 'AAP Job Template ID to launch')
+    }
+
+    environment {
+        AAP_HOST  = credentials('AAP-url')      // set to https://172.16.3.48
+        AAP_CREDS = credentials('Asnible-Automation-creds')
+    }
+
+    stages {
+        stage('Launch Job Template') {
+            steps {
+                script {
+                    def response = sh(script: """
+                        curl -s -k -u "${AAP_CREDS_USR}:${AAP_CREDS_PSW}" \
+                          -X POST "${AAP_HOST}/api/controller/v2/job_templates/${params.AAP_TEMPLATE_ID}/launch/" \
+                          -H "Content-Type: application/json"
+                    """, returnStdout: true).trim()
+
+                    if (response.startsWith("<!doctype") || response.startsWith("<html")) {
+                        error("AAP API returned an HTML error page (wrong endpoint or auth issue). Response:\n${response}")
+                    }
+
+                    def jobId = sh(script: "echo '${response}' | jq -r '.job'", returnStdout: true).trim()
+
+                    if (jobId == "null" || jobId == "") {
+                        error("Failed to launch job template. Response: ${response}")
+                    }
+
+                    echo "Job launched successfully. Job ID: ${jobId}"
+                    env.AAP_JOB_ID = jobId
+                }
+            }
+        }
+
+        stage('Poll Status & Fetch Logs') {
+            steps {
+                script {
+                    def status = "pending"
+                    while (!(status in ["successful", "failed", "error", "canceled"])) {
+                        sleep(time: 5, unit: "SECONDS")
+                        status = sh(script: """
+                            curl -s -k -u "${AAP_CREDS_USR}:${AAP_CREDS_PSW}" \
+                              "${AAP_HOST}/api/controller/v2/jobs/${env.AAP_JOB_ID}/" | jq -r '.status'
+                        """, returnStdout: true).trim()
+                        echo "Current status: ${status}"
+                    }
+
+                    echo "========== JOB LOGS =========="
+                    sh """
+                        curl -s -k -u "${AAP_CREDS_USR}:${AAP_CREDS_PSW}" \
+                          "${AAP_HOST}/api/controller/v2/jobs/${env.AAP_JOB_ID}/stdout/?format=txt"
+                    """
+                    echo "==============================="
+
+                    if (status != "successful") {
+                        error("AAP job did not complete successfully (status: ${status})")
+                    }
+                }
+            }
+        }
+    }
+}
