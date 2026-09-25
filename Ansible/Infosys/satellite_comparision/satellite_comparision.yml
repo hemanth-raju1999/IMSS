@@ -1,0 +1,74 @@
+---
+- hosts: hosts1
+  gather_facts: no
+  ignore_unreachable: yes
+  ignore_errors: yes
+  tasks:
+
+  ## Downloading the hosts already registered into Satellite.
+
+   - name: Gathering Prod  Hostname Details(i.e.from satellite group)
+     block:          
+       - name: Deleting old prod host group file
+         delegate_to: localhost
+         file:
+           path: "{{ item }}"
+           state: absent
+
+         with_items:
+           - "/var/lib/awx/projects/hemanth/infosys/satellite_comparision/only_satellite_hosts.txt"
+       
+       - name: Getting IP & Hostname from ansible tower host group & keeping in a intermediate file
+         shell: echo  {{ inventory_hostname }} >> /var/lib/awx/projects/hemanth/infosys/satellite_comparision/only_satellite_hosts.txt  
+         delegate_to: localhost
+
+       #- name: filtering the IP's
+       #  shell: cat 'hosts1.csv' | awk -F ',' '{print $1}' > only_satellite_hosts.csv
+           
+       
+     #Here prod.csv is the list of servers registered to Satellite              
+     rescue:
+       - include_tasks: email.yml
+
+
+#A static list of servers has been provided : Let us assume with the name: statichosts.csv
+
+
+- name: Comparing qualys hosts with Satellite hosts
+  hosts: localhost
+  become: yes
+  ignore_errors: yes
+  gather_facts: no
+
+  tasks:
+    - name:
+      block:
+        - name: Deleting the old files(notinsatellite.txt)
+          file:
+            path: "/var/lib/awx/projects/hemanth/infosys/satellite_comparision/notinsatellite.txt"
+            state: absent
+
+        - name: filtering the IP's
+          shell: cat 'hosts.csv' | awk -F ',' '{print $1}' > static_hosts.csv
+        
+        - name: Saving the output of satellite hosts
+          shell: cat /var/lib/awx/projects/hemanth/infosys/satellite_comparision/only_satellite_hosts.csv
+          register: satellite_hosts
+
+        - name: Reading the Static inventory List
+          shell: cat /var/lib/awx/projects/hemanth/infosys/satellite_comparision/static_hosts.csv
+          register: static_hosts
+
+        - debug:
+             var:  static_hosts
+        
+        - name: Add to list file 
+          lineinfile:
+             line:   "{{ item }}"  
+             path: /var/lib/awx/projects/hemanth/infosys/satellite_comparision/notinSatellite.txt
+             create: yes
+             insertafter: EOF
+          delegate_to: localhost
+          when: '"{{ item }}" not in satellite_hosts.stdout_lines'
+          loop: "{{ static_hosts.stdout_lines }}"
+
