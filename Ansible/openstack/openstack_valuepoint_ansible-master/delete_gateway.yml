@@ -1,0 +1,29 @@
+---
+- name: OpenStack Resource Cleanup
+  hosts: localhost
+  gather_facts: false
+  vars:
+    router: "{{ router }}"
+  tasks:
+    ###################################################################
+    # Remove Router Gateway
+    ###################################################################
+    - name: Remove Router External Gateway
+      openstack.cloud.router:
+        state: absent
+        name: "{{ router }}"
+        network: null
+      register: router_gateway_remove_result
+
+    - name: Display router gateway removal result (formatted)
+      debug:
+        msg:
+          - "=========================================================="
+          - "               ROUTER GATEWAY REMOVAL REPORT"
+          - "=========================================================="
+          - "Router            : {{ router_gateway_remove_result.router.name | default(router) }}"
+          - "Router ID         : {{ router_gateway_remove_result.router.id | default('n/a') }}"
+          - "External Gateway  : {{ router_gateway_remove_result.router.external_gateway_info | default('none') }}"
+          - "Changed           : {{ router_gateway_remove_result.changed | default('n/a') }}"
+          - "Result            : {{ 'GATEWAY REMOVED' if router_gateway_remove_result.changed else 'NO CHANGE / ALREADY REMOVED' }}"
+          - "=========================================================="

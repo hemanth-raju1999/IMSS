@@ -1,0 +1,19 @@
+---
+- name: Attach subnet to router
+  hosts: localhost
+  gather_facts: false
+  vars:
+    router: "{{ router }}"
+    subnet: "{{ subnet }}"
+  tasks:
+    - name: Attach subnet interface to router
+      openstack.cloud.router:
+        state: present
+        name: "{{ router }}"
+        interfaces:
+          - "{{ subnet }}"
+      register: router_interface_result
+
+    - name: Display result
+      debug:
+        var: router_interface_result

@@ -1,0 +1,78 @@
+---
+- name: Manage OpenStack Project
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - openstack_auth_vars.yml
+  vars:
+    # From AAP survey
+    project_name: "{{ project_name }}"
+    project_description: "{{ project_description | default('') }}"
+    project_domain: "{{ project_domain | default('Default') }}"
+    project_enabled: "{{ project_enabled | default(true) }}"
+    project_state: "{{ project_state | default('present') }}"   # present = create, absent = delete
+
+  tasks:
+    - name: Check if project already exists (for accurate reporting)
+      openstack.cloud.project_info:
+        #auth: "{{ os_auth }}"
+        name: "{{ project_name }}"
+      register: existing_project_check
+      when: project_state == 'present'
+
+    - name: Set fact - did project exist before this run?
+      set_fact:
+        project_pre_existed: "{{ (existing_project_check.projects | default([]) | length) > 0 }}"
+      when: project_state == 'present'
+
+    - name: Create Project (only if it doesn't already exist)
+      openstack.cloud.project:
+       # auth: "{{ os_auth }}"
+        auth_type: password
+        interface: public
+        state: "{{ project_state }}"
+        name: "{{ project_name }}"
+        description: "{{ project_description }}"
+        domain_id: "{{ project_domain }}"
+        is_enabled: "{{ project_enabled }}"
+        # NOTE: if your collection version rejects 'is_enabled', change to 'enabled' instead
+      register: project_result
+      when: project_state == 'absent' or not project_pre_existed
+
+    - name: Display project result (formatted) - already existed, skipped
+      debug:
+        msg:
+          - "=========================================================="
+          - "              PROJECT CREATION SKIPPED"
+          - "=========================================================="
+          - "Project Name : {{ project_name }}"
+          - "Result       : SKIPPED - project already exists, no changes made (create-only mode)"
+          - "=========================================================="
+      when: project_state == 'present' and project_pre_existed
+
+    - name: Display project result (formatted) - newly created
+      debug:
+        msg:
+          - "=========================================================="
+          - "              PROJECT CREATION REPORT"
+          - "=========================================================="
+          - "Name        : {{ project_result.project.name | default(project_name) }}"
+          - "ID          : {{ project_result.project.id | default('n/a') }}"
+          - "Description : {{ project_result.project.description | default('n/a') }}"
+          - "Domain      : {{ project_result.project.domain_id | default(project_domain) }}"
+          - "Enabled     : {{ project_result.project.is_enabled | default('n/a') }}"
+          - "Result      : SUCCESS - project newly created"
+          - "=========================================================="
+      when: project_state == 'present' and not project_pre_existed
+
+    - name: Display project deletion result (formatted)
+      debug:
+        msg:
+          - "=========================================================="
+          - "              PROJECT DELETION REPORT"
+          - "=========================================================="
+          - "Project Name : {{ project_name }}"
+          - "Result       : {{ 'SUCCESS - project deleted' if project_result.changed else 'NO CHANGE - project may not have existed' }}"
+          - "=========================================================="
+      when: project_state == 'absent'

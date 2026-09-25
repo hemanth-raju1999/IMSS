@@ -1,0 +1,316 @@
+---
+- name: RHOSP Ongoing Validation
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+###########################################################################
+# 1. Validate OpenStack Compute Services
+###########################################################################
+
+    - name: Get Compute Services
+      openstack.cloud.compute_service_info:
+        #auth: "{{ auth_env }}"
+      register: compute_services
+      
+    - name: Display compute services
+      debug:
+        msg: >
+          {{ item.binary }} (id={{ item.id }}) on {{ item.host }}
+          is {{ item.state }}/{{ item.status }}
+      loop: "{{ compute_services.compute_services }}"
+      loop_control:
+        label: "{{ item.binary }}"
+        
+###########################################################################
+# 2. Validate Hypervisors
+###########################################################################
+
+    - name: List hypervisors via generic resources module
+      openstack.cloud.resources:
+        #auth: "{{ auth_env }}"
+        service: compute
+        type: hypervisor
+      register: hypervisor_list
+      
+        
+    - name: Display hypervisor status (clean output)
+      debug:
+        msg: "Hypervisor {{ item.name }} is {{ item.state }}/{{ item.status }}"
+      loop: "{{ hypervisor_list.resources }}"
+      loop_control:
+        label: "{{ item.name }}"
+      
+    
+###########################################################################
+# 3. Validate Availability Zone
+###########################################################################
+
+    - name: List availability zones via generic resources module
+      openstack.cloud.resources:
+        #auth: "{{ auth_env }}"
+        service: compute
+        type: availability_zone
+      register: az_list
+
+    - name: Display availability zone status (clean output)
+      debug:
+        msg: "AZ {{ item.name }} is {{ 'available' if item.state.available else 'NOT available' }}"
+      loop: "{{ az_list.resources }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+
+###########################################################################
+# 4. Validate Host Aggregates
+###########################################################################
+     
+    - name: List host aggregates
+      openstack.cloud.resources:
+        #auth: "{{ auth_env }}"
+        service: compute
+        type: aggregate
+      register: aggregate_list
+
+    - name: Display host aggregates
+      debug:
+        msg: 
+          - "Aggregate: {{ item.name }}"
+          - "Availability Zone: {{ item.availability_zone | default('none') }}"
+          - "Hosts: {{ item.hosts | default([]) | join(', ') if item.hosts else 'none' }}"
+      loop: "{{ aggregate_list.resources }}"
+      loop_control:
+        label: "{{ item.name }}"  
+        
+        
+###########################################################################
+# 5. Validate Image
+###########################################################################
+
+    - name: Get Images
+      openstack.cloud.image_info:
+        #auth: "{{ auth_env }}"
+      register: images
+
+    - name: Display available images
+      debug:
+        msg: >
+          Image: {{ item.name }} (id={{ item.id[:8] }}),
+          status: {{ item.status }},
+          size: {{ (item.size / 1024 / 1024) | round(2) }} MB,
+          disk_format: {{ item.disk_format }}
+      loop: "{{ images.images }}"
+      loop_control:
+        label: "{{ item.name }}"
+    
+    
+###########################################################################
+# 6. Validate Flavor
+###########################################################################
+
+    - name: Get Flavors
+      openstack.cloud.compute_flavor_info:
+        #auth: "{{ auth_env }}"
+      register: flavors
+
+    - name: Display flavor details
+      debug:
+        msg: >
+          Flavor: {{ item.name }} (id={{ item.id }}),
+          vCPUs: {{ item.vcpus }},
+          RAM: {{ item.ram }} MB,
+          Root Disk: {{ item.disk }} GB,
+          Ephemeral: {{ item.ephemeral | default(0) }} GB,
+          Swap: {{ item.swap | default(0) }} MB
+      loop: "{{ flavors.flavors }}"
+      loop_control:
+        label: "{{ item.name }}"
+        
+###########################################################################
+# 7. Validate Existing Volumes
+###########################################################################
+
+    - name: Get Volumes
+      openstack.cloud.volume_info:
+        #auth: "{{ auth_env }}"
+      register: volumes
+
+    - name: Display volume details (extended)
+      debug:
+        msg: >
+          Volume: {{ item.name }}, Size: {{ item.size }} GB,
+          Status: {{ item.status }}, Type: {{ item.volume_type }},
+          AZ: {{ item.availability_zone }},
+          Bootable: {{ item.is_bootable }},
+          Attached: {{ 'yes' if item.attachments else 'no' }}
+      loop: "{{ volumes.volumes }}"
+      loop_control:
+        label: "{{ item.name }}"
+        
+        
+        
+###########################################################################
+# 8. Validate Volume Type
+###########################################################################
+
+    - name: Get specific volume type info
+      openstack.cloud.volume_type_info:
+        #auth: "{{ auth_env }}"
+        name: "{{ item }}"
+      register: volume_type_details
+      loop: "{{ volumes.volumes | map(attribute='volume_type') | unique | list }}"
+
+    - name: Display volume type details
+      debug:
+        msg: >
+          Volume Type: {{ item.volume_type.name }} (id={{ item.volume_type.id }}),
+          Public: {{ item.volume_type.is_public }},
+          Extra Specs: {{ item.volume_type.extra_specs | default({}) }}
+      loop: "{{ volume_type_details.results }}"
+      loop_control:
+        label: "{{ item.volume_type.name }}"
+
+###########################################################################
+# 9. Validate VM Instances
+###########################################################################
+
+    - name: Get VM Instances
+      openstack.cloud.server_info:
+        #auth: "{{ auth_env }}"
+      register: vm_instances
+
+    - name: Display VM instance details
+      debug:
+        msg: >
+          VM: {{ item.name }} (id={{ item.id[:8] }}),
+          Status: {{ item.status }},
+          Flavor: {{ item.flavor.original_name | default(item.flavor.id) | default('n/a') }},
+          AZ: {{ item.availability_zone | default('n/a') }},
+          Host: {{ item.hypervisor_hostname | default(item['OS-EXT-SRV-ATTR:host']) | default('n/a') }}
+      loop: "{{ vm_instances.servers }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+###########################################################################
+# 10. Validate Network
+###########################################################################
+
+    - name: Get Networks
+      openstack.cloud.networks_info:
+        #auth: "{{ auth_env }}"
+      register: networks
+
+    - name: Display network details
+      debug:
+        msg: >
+          Network: {{ item.name }} (id={{ item.id }}),
+          Status: {{ item.status }},
+          Subnets: {{ item.subnet_ids | default(item.subnets) | default([]) | join(', ') }}
+      loop: "{{ networks.networks }}"
+      loop_control:
+        label: "{{ item.name }}"
+        
+        
+###########################################################################
+# 11. Validate Routers
+###########################################################################
+
+    - name: Get Routers
+      openstack.cloud.routers_info:
+        #auth: "{{ auth_env }}"
+      register: routers
+
+    - name: Display router details
+      debug:
+        msg: "Router: {{ item.name }}, Status: {{ item.status }}"
+      loop: "{{ routers.routers }}"
+      loop_control:
+        label: "{{ item.name }}"
+        
+        
+        
+###########################################################################
+# 12.  Validate Floating IPs
+###########################################################################
+
+    - name: Get Floating IPs
+      openstack.cloud.floating_ip_info:
+        #auth: "{{ auth_env }}"
+      register: fips
+
+    - name: Display floating IP details
+      debug:
+        msg: "Floating IP: {{ item.floating_ip_address }}, Status: {{ item.status }}"
+      loop: "{{ fips.floating_ips }}"
+      loop_control:
+        label: "{{ item.floating_ip_address }}"
+        
+        
+        
+###########################################################################
+# 13. Final Ongoing-Validation Summary Report
+###########################################################################
+
+    - name: Build summary facts (actual values)
+      set_fact:
+        summary_compute: "{{ compute_services.compute_services | map(attribute='binary') | list }}"
+        summary_compute_unhealthy: "{{ compute_services.compute_services | rejectattr('state', 'equalto', 'up') | map(attribute='binary') | list }}"
+
+        summary_hypervisors: "{{ hypervisor_list.resources | map(attribute='name') | list }}"
+        summary_hypervisor_unhealthy: "{{ hypervisor_list.resources | rejectattr('state', 'equalto', 'up') | map(attribute='name') | list }}"
+
+        summary_az: "{{ az_list.resources | map(attribute='name') | list }}"
+        summary_az_unavailable: "{{ az_list.resources | rejectattr('state.available', 'equalto', true) | map(attribute='name') | list }}"
+
+        summary_aggregates: "{{ aggregate_list.resources | map(attribute='name') | list }}"
+
+        summary_images: "{{ images.images | map(attribute='name') | list }}"
+        summary_image_inactive: "{{ images.images | rejectattr('status', 'equalto', 'active') | map(attribute='name') | list }}"
+
+        summary_flavors: "{{ flavors.flavors | map(attribute='name') | list }}"
+
+        summary_volumes: "{{ volumes.volumes | map(attribute='name') | list }}"
+        summary_volume_unhealthy: "{{ volumes.volumes | rejectattr('status', 'in', ['available', 'in-use']) | map(attribute='name') | list }}"
+
+        summary_volume_types: "{{ volume_type_details.results | map(attribute='volume_type.name') | list }}"
+
+        summary_vms: "{{ vm_instances.servers | map(attribute='name') | list }}"
+        summary_vm_unhealthy: "{{ vm_instances.servers | rejectattr('status', 'equalto', 'ACTIVE') | map(attribute='name') | list }}"
+
+        summary_networks: "{{ networks.networks | map(attribute='name') | list }}"
+        summary_network_down: "{{ networks.networks | rejectattr('status', 'equalto', 'ACTIVE') | map(attribute='name') | list }}"
+
+        summary_routers: "{{ routers.routers | map(attribute='name') | list }}"
+        summary_router_down: "{{ routers.routers | rejectattr('status', 'equalto', 'ACTIVE') | map(attribute='name') | list }}"
+
+        summary_fips: "{{ fips.floating_ips | map(attribute='floating_ip_address') | list }}"
+
+    - name: Display final ongoing-validation summary
+      debug:
+        msg:
+          - "=========================================================="
+          - "           RHOSP ONGOING-VALIDATION SUMMARY REPORT"
+          - "=========================================================="
+          - "1. Compute Services   : {{ summary_compute | join(', ') }}"
+          - "   Unhealthy          : {{ summary_compute_unhealthy | join(', ') if summary_compute_unhealthy else 'none' }}"
+          - "2. Hypervisors        : {{ summary_hypervisors | join(', ') }}"
+          - "   Unhealthy          : {{ summary_hypervisor_unhealthy | join(', ') if summary_hypervisor_unhealthy else 'none' }}"
+          - "3. Availability Zones : {{ summary_az | join(', ') }}"
+          - "   Unavailable        : {{ summary_az_unavailable | join(', ') if summary_az_unavailable else 'none' }}"
+          - "4. Host Aggregates    : {{ summary_aggregates | join(', ') }}"
+          - "5. Images             : {{ summary_images | join(', ') }}"
+          - "   Inactive           : {{ summary_image_inactive | join(', ') if summary_image_inactive else 'none' }}"
+          - "6. Flavors            : {{ summary_flavors | join(', ') }}"
+          - "7. Volumes            : {{ summary_volumes | join(', ') }}"
+          - "   Unhealthy          : {{ summary_volume_unhealthy | join(', ') if summary_volume_unhealthy else 'none' }}"
+          - "8. Volume Types       : {{ summary_volume_types | join(', ') }}"
+          - "9. VM Instances       : {{ summary_vms | join(', ') }}"
+          - "   Not Active         : {{ summary_vm_unhealthy | join(', ') if summary_vm_unhealthy else 'none' }}"
+          - "10. Networks          : {{ summary_networks | join(', ') }}"
+          - "    Down              : {{ summary_network_down | join(', ') if summary_network_down else 'none' }}"
+          - "11. Routers           : {{ summary_routers | join(', ') }}"
+          - "    Down              : {{ summary_router_down | join(', ') if summary_router_down else 'none' }}"
+          - "12. Floating IPs      : {{ summary_fips | join(', ') }}"
+          - "=========================================================="
+          - "Overall Status: {{ 'PASS - All checks healthy' if (summary_compute_unhealthy + summary_hypervisor_unhealthy + summary_az_unavailable + summary_image_inactive + summary_volume_unhealthy + summary_vm_unhealthy + summary_network_down + summary_router_down) | length == 0 else 'FAIL - Issues detected, review above' }}"
+          - "=========================================================="

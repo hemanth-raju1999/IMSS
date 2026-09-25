@@ -1,0 +1,19 @@
+---
+- name: Manage OpenStack Port
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+
+    - name: Create/Delete Port
+      openstack.cloud.port:
+        state: present
+        name: "{{ port }}"
+        network: "{{ network }}"
+        security_groups:
+          - "{{ security_group }}"
+      register: port_result
+
+    - name: Display Result
+      debug:
+        var: port_result

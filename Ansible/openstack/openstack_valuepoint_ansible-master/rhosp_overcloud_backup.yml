@@ -1,0 +1,128 @@
+---
+- name: Run overcloud backup from the director
+  hosts: director
+  gather_facts: false
+
+  vars_files:
+    - openstack_auth_vars.yml
+
+  vars:
+    tripleo_backup_and_restore_server: ""            # add nfs server ip
+    backup_nfs_path: /image-transfer
+    tripleo_backup_and_restore_shared_storage_folder: "{{ backup_nfs_path }}"  # change here
+
+    #backup_vars_file: /home/stack/overcloud-backup-vars.yaml
+    overcloud_stack_name: overcloud
+    tripleo_inventory_file: /home/stack/tripleo-inventory.yaml
+    overcloud_backup_cmd: "openstack overcloud backup"
+    backup_log: "{{ backup_nfs_path }}/overcloud_backup_{{ report_timestamp.stdout }}.log"
+    backup_marker: "/home/stack/.overcloud_backup_start_{{ report_timestamp.stdout }}"
+
+  tasks:
+    # ------------------------------------------------------------------ prechecks
+    - name: Get report timestamp
+      ansible.builtin.command:
+        cmd: date +%Y%m%d_%H%M%S
+      register: report_timestamp
+      changed_when: false
+      #delegate_to: localhost
+
+    - name: Verify NFS server variable is set
+      ansible.builtin.assert:
+        that: tripleo_backup_and_restore_server | length > 0
+        fail_msg: "Set tripleo_backup_and_restore_server (NFS server IP/FQDN)"
+        quiet: true
+
+    - name: Verify NFS share is mounted on the director
+      ansible.builtin.command:
+        cmd: "findmnt --noheadings --output FSTYPE --target {{ backup_nfs_path }}"
+      register: nfs_mount_check
+      changed_when: false
+      failed_when: "'nfs' not in nfs_mount_check.stdout"
+
+    - name: Check if the tripleo inventory file exists
+      ansible.builtin.stat:
+        path: "{{ tripleo_inventory_file }}"
+      register: tripleo_inventory_stat
+
+    - name: Generate tripleo inventory file if missing
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          source ~/stackrc
+          tripleo-ansible-inventory --static-yaml-inventory {{ tripleo_inventory_file }} --stack {{ overcloud_stack_name }}
+        executable: /bin/bash
+      when: not tripleo_inventory_stat.stat.exists
+      changed_when: true
+
+    - name: Verify OpenStack credentials were injected by AAP
+      ansible.builtin.assert:
+        that:
+          - lookup('env', 'OS_AUTH_URL') | length > 0
+          - lookup('env', 'OS_USERNAME') | length > 0
+          - lookup('env', 'OS_PASSWORD') | length > 0
+        fail_msg: "OS_AUTH_URL / OS_USERNAME / OS_PASSWORD not found - attach the OpenStack credential to the job template"
+     # no_log: true
+
+    # ------------------------------------------------------------------ backup
+    - name: Create start marker for the post-check
+      ansible.builtin.file:
+        path: "{{ backup_marker }}"
+        state: touch
+        modification_time: now
+      changed_when: false
+
+    - name: Run overcloud backup from the director
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          {{ overcloud_backup_cmd }} --extra-vars '{"tripleo_backup_and_restore_server": "{{ tripleo_backup_and_restore_server }}", "tripleo_backup_and_restore_shared_storage_folder": "{{ tripleo_backup_and_restore_shared_storage_folder }}"}' 2>&1 | tee {{ backup_log }}
+        executable: /bin/bash
+      environment: "{{ auth_env }}"
+      # no_log: true
+      async: 7200
+      poll: 30
+      register: overcloud_backup
+      changed_when: true
+
+    # ------------------------------------------------------------------ post-check
+    - name: Check that new backup files exist on the NFS path
+      ansible.builtin.command:
+        argv:
+          - find
+          - "{{ backup_nfs_path }}"
+          - -type
+          - f
+          - -newer
+          - "{{ backup_marker }}"
+          - "!"
+          - -name
+          - "overcloud_backup_*.log"
+          - -printf
+          - "%TY-%Tm-%Td %TH:%TM  %s bytes  %p\\n"
+      register: backup_files
+      changed_when: false
+      failed_when: backup_files.rc != 0 or backup_files.stdout_lines | length == 0
+
+    - name: Show new backup files
+      ansible.builtin.debug:
+        msg: "{{ backup_files.stdout_lines }}"
+
+    - name: Remove start marker
+      ansible.builtin.file:
+        path: "{{ backup_marker }}"
+        state: absent
+      changed_when: false
+
+    # ------------------------------------------------------------------ summary
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "Report timestamp : {{ report_timestamp.stdout }}"
+          - "NFS server       : {{ tripleo_backup_and_restore_server }}"
+          - "NFS folder       : {{ tripleo_backup_and_restore_shared_storage_folder }} (mounted on the director at {{ backup_nfs_path }})"
+          - "Backup command   : {{ overcloud_backup_cmd }}"
+          - "Duration         : {{ overcloud_backup.delta | default('n/a') }}"
+          - "Log file         : {{ backup_log }}"
+          - "New backup files : {{ backup_files.stdout_lines | length }}"
+          - "Result           : SUCCESS"

@@ -1,0 +1,36 @@
+---
+- name: Create an OpenStack Availability Zone (Host Aggregate)
+  hosts: localhost
+  gather_facts: false
+  vars:
+    az: "{{ az }}"
+    aggregate_name: "{{ aggregate_name }}"
+    compute_host: "{{ compute_host | default('') }}"
+
+  tasks:
+    - name: Validate required survey inputs
+      ansible.builtin.assert:
+        that:
+          - az is defined and az | trim != ""
+          - aggregate_name is defined and aggregate_name | trim != ""
+        fail_msg: "One or more required survey fields (az, aggregate_name) are missing or empty."
+        success_msg: "All required survey inputs are present."
+
+    - name: Create host aggregate and set Availability Zone (compute_host optional)
+      openstack.cloud.host_aggregate:
+        name: "{{ aggregate_name }}"
+        availability_zone: "{{ az }}"
+        hosts: "{{ [compute_host] if compute_host | trim != '' else omit }}"
+        state: present
+      register: aggregate_info
+
+    - name: Display aggregate information
+      ansible.builtin.debug:
+        var: aggregate_info
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg: >-
+          Availability Zone '{{ az }}' created successfully using Host Aggregate '{{ aggregate_name }}'{{
+          ", with host '" + compute_host + "' added." if compute_host | trim != '' else " (no compute host attached yet)."
+          }}

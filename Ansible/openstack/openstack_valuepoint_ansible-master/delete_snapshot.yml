@@ -1,0 +1,34 @@
+---
+- name: Remove RHOSP Snapshots
+  hosts: director
+  gather_facts: false
+
+  vars_files:
+    - vars/backup_vars.yml
+
+  tasks:
+
+    - name: Verify TripleO inventory exists
+      ansible.builtin.stat:
+        path: "{{ tripleo_inventory }}"
+      register: inventory_check
+
+    - name: Fail if inventory is missing
+      ansible.builtin.fail:
+        msg: "TripleO inventory not found at {{ tripleo_inventory }}"
+      when: not inventory_check.stat.exists
+
+    - name: Remove RHOSP snapshots
+      ansible.builtin.shell: |
+        source "{{ stackrc_file }}"
+
+        openstack overcloud backup snapshot \
+          --remove \
+          --inventory "{{ tripleo_inventory }}"
+      args:
+        executable: /bin/bash
+      register: remove_result
+
+    - name: Display removal result
+      ansible.builtin.debug:
+        var: remove_result.stdout_lines

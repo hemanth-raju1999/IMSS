@@ -1,0 +1,66 @@
+---
+- name: Email the CSV Service Health Report
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - aap_creds.yml
+ 
+  # report_dir, report_filename_prefix, report_timestamp arrive automatically as extra_vars from JT1's workflow artifacts
+
+  tasks:
+
+    - name: Base64-encode the CSV report for attachment
+      ansible.builtin.command:
+        cmd: "base64 -w 0 {{ report_dir }}/{{ report_filename_prefix }}_{{ report_timestamp }}.csv"
+      register: csv_base64
+      changed_when: false
+
+    - name: Render the raw .eml message
+      ansible.builtin.copy:
+        dest: "/tmp/{{ report_filename_prefix }}_{{ report_timestamp }}.eml"
+        mode: '0600'
+        content: |
+          From: sohail.akhtar.value@tatatel.co.in
+          To: sohail.akhtar.value@tatatel.co.in
+          Subject: TripleO Overcloud Service Health Report - {{ report_timestamp }}
+          MIME-Version: 1.0
+          Content-Type: multipart/mixed; boundary="REPORTBOUNDARY"
+
+          --REPORTBOUNDARY
+          Content-Type: text/plain; charset="UTF-8"
+
+          Attached is the TripleO overcloud service health report
+          generated on {{ report_timestamp }}.
+
+          --REPORTBOUNDARY
+          Content-Type: text/csv; name="{{ report_filename_prefix }}_{{ report_timestamp }}.csv"
+          Content-Transfer-Encoding: base64
+          Content-Disposition: attachment; filename="{{ report_filename_prefix }}_{{ report_timestamp }}.csv"
+
+          {{ csv_base64.stdout }}
+
+          --REPORTBOUNDARY--
+
+    - name: Send report email via curl (proxy + STARTTLS)
+      ansible.builtin.command:
+        cmd: >-
+          curl -v --proxy http://dcproxy.ttsl.com:8080
+          --proxy-user "ttsl-automation:{{ smtp_password }}"
+          --ssl-reqd
+          --mail-from "sohail.akhtar.value@tatatel.co.in"
+          --mail-rcpt "sohail.akhtar.value@tatatel.co.in"
+          --upload-file "/tmp/{{ report_filename_prefix }}_{{ report_timestamp }}.eml"
+          --user "{{ smtp_username }}:{{ smtp_password }}"
+          "smtp://smtp.office365.com:587"
+      register: mail_send_result
+      changed_when: false
+      # no_log: true
+
+    - name: Show mail send result
+      ansible.builtin.debug:
+        msg: "Mail send return code: {{ mail_send_result.rc }}"
+
+    - name: Clean up temp .eml file
+      ansible.builtin.file:
+        path: "/tmp/{{ report_filename_prefix }}_{{ report_timestamp }}.eml"
+        state: absent

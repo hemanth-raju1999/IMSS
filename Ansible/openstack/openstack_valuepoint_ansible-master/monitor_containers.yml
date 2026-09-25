@@ -1,0 +1,170 @@
+---
+- name: RHOSP Podman Container Monitoring
+  hosts: director
+  gather_facts: false
+  ignore_errors: yes
+  vars_files:
+    - monitor_vars.yml
+
+  vars:
+    csv_file: "/transfer-images/"
+    node_ssh_user: <provide user>
+
+  tasks:
+
+    # ========================================================
+    # STEP 1: Get OpenStack Compute Services
+    # ========================================================
+
+    - name: Get OpenStack compute service list
+      ansible.builtin.command:
+        cmd: openstack compute service list -f json
+      register: compute_service_output
+      changed_when: false
+
+    # ========================================================
+    # STEP 2: Parse OpenStack output
+    # ========================================================
+
+    - name: Parse OpenStack compute service output
+      ansible.builtin.set_fact:
+        compute_service_data: "{{ compute_service_output.stdout | from_json }}"
+
+    # ========================================================
+    # STEP 3: Identify Compute Nodes
+    # ========================================================
+
+    - name: Identify Compute nodes
+      ansible.builtin.set_fact:
+        compute_nodes: >-
+          {{
+            compute_service_data
+            | selectattr('Binary', 'equalto', 'nova-compute')
+            | map(attribute='Host')
+            | list
+            | unique
+          }}
+
+    # ========================================================
+    # STEP 4: Identify Controller Nodes
+    # ========================================================
+
+    - name: Identify Controller nodes
+      ansible.builtin.set_fact:
+        controller_nodes: >-
+          {{
+            compute_service_data
+            | rejectattr('Binary', 'equalto', 'nova-compute')
+            | map(attribute='Host')
+            | list
+            | unique
+          }}
+
+    # ========================================================
+    # STEP 5: Display discovered nodes
+    # ========================================================
+
+    - name: Display Compute nodes
+      ansible.builtin.debug:
+        msg: "Compute Nodes: {{ compute_nodes }}"
+
+    - name: Display Controller nodes
+      ansible.builtin.debug:
+        msg: "Controller Nodes: {{ controller_nodes }}"
+
+    # ========================================================
+    # STEP 6: Build Controller container checks
+    # ========================================================
+
+    - name: Build Controller container list
+      ansible.builtin.set_fact:
+        controller_container_checks: >-
+          {{
+            controller_nodes
+            | product(controller_podman_containers)
+            | list
+          }}
+
+    # ========================================================
+    # STEP 7: Build Compute container checks
+    # ========================================================
+
+    - name: Build Compute container list
+      ansible.builtin.set_fact:
+        compute_container_checks: >-
+          {{
+            compute_nodes
+            | product(compute_podman_containers)
+            | list
+          }}
+
+    # ========================================================
+    # STEP 8: Combine all container checks
+    # ========================================================
+
+    - name: Combine Controller and Compute container checks
+      ansible.builtin.set_fact:
+        container_checks: >-
+          {{
+            controller_container_checks
+            + compute_container_checks
+          }}
+
+    # ========================================================
+    # STEP 9: Check Podman container status
+    # ========================================================
+
+    - name: Check Podman container status
+      ansible.builtin.shell: |
+        ssh -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            {{ node_ssh_user }}@{{ item.0 }} \
+            "podman inspect --format '{{ '{{' }}.State.Status{{ '}}' }}' {{ item.1 }} 2>/dev/null || echo not_found"
+      loop: "{{ container_checks }}"
+      register: container_results
+      changed_when: false
+      failed_when: false
+
+    # ========================================================
+    # STEP 10: Create CSV file
+    # ========================================================
+
+    - name: Create CSV report
+      ansible.builtin.copy:
+        dest: "{{ csv_file }}"
+        content: "Node,Container,Status\n"
+        mode: "0644"
+
+    # ========================================================
+    # STEP 11: Add container results to CSV
+    # ========================================================
+
+    - name: Add container status to CSV
+      ansible.builtin.lineinfile:
+        path: "{{ csv_file }}"
+        insertafter: EOF
+        line: >-
+          {{ item.item.0 }},
+          {{ item.item.1 }},
+          {{ item.stdout | default('unknown') | trim }}
+      loop: "{{ container_results.results }}"
+
+    # ========================================================
+    # STEP 12: Display container status
+    # ========================================================
+
+    - name: Display container status
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.item.0 }},
+          {{ item.item.1 }},
+          {{ item.stdout | default('unknown') | trim }}
+      loop: "{{ container_results.results }}"
+
+    # ========================================================
+    # STEP 13: Display CSV location
+    # ========================================================
+
+    - name: Display CSV report location
+      ansible.builtin.debug:
+        msg: "RHOSP container report created at {{ csv_file }}"

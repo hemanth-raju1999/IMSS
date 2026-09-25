@@ -1,0 +1,28 @@
+---
+- name: Delete OpenStack VM
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Delete VM
+      openstack.cloud.server:
+        # auth: "{{ auth }}"
+        state: absent
+        name: "{{ vm_name }}"
+        wait: true
+        timeout: 600
+      register: delete_result
+
+    - name: Confirm VM deleted
+      openstack.cloud.server_info:
+        # auth: "{{ auth }}"
+        server: "{{ vm_name }}"
+      register: post_delete_check
+      until: post_delete_check.servers | length == 0
+      retries: 5
+      delay: 5
+
+    - name: Display deletion status
+      debug:
+        msg: "{{ 'VM ' + vm_name + ' successfully deleted' if post_delete_check.servers | length == 0 else 'VM ' + vm_name + ' still exists — deletion may have failed' }}"
+

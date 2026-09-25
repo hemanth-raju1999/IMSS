@@ -1,0 +1,27 @@
+---
+- name: OpenStack Resource Cleanup
+  hosts: localhost
+  gather_facts: false
+  vars:
+    subnet: "{{ subnet }}"
+  tasks:
+    ###################################################################
+    # Delete Subnet
+    ###################################################################
+    - name: Delete Subnet
+      openstack.cloud.subnet:
+        state: absent
+        name: "{{ subnet }}"
+      register: subnet_delete_result
+
+    - name: Display subnet deletion result (formatted)
+      debug:
+        msg:
+          - "=========================================================="
+          - "               SUBNET DELETION REPORT"
+          - "=========================================================="
+          - "Subnet Name   : {{ subnet }}"
+          - "Changed       : {{ subnet_delete_result.changed | default('n/a') }}"
+          - "Result        : {{ 'DELETED SUCCESSFULLY' if subnet_delete_result.changed else 'NOT FOUND / ALREADY ABSENT' }}"
+          - "=========================================================="
+   

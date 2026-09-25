@@ -1,0 +1,93 @@
+---
+- name: OpenStack VM Migration — Execute
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - openstack_auth_vars.yml
+  vars:
+    vm_name: "{{ vm_name }}"
+    migration_type: "{{ migration_type | default('cold') }}"
+    dest_host: "{{ dest_host | default('') }}"
+    block_migration: "{{ block_migration | default(false) }}"
+    confirm_resize: "{{ confirm_resize | default(true) }}"
+    os_cloud_name: "{{ os_cloud | default('openstack') }}"
+    current_host: "{{ current_host | default('unknown') }}"
+
+  tasks:
+
+    - name: DEBUG — starting migration using pre-validated context
+      ansible.builtin.debug:
+        msg: >
+          Executing {{ migration_type }} migration for '{{ vm_name }}' from
+          '{{ current_host }}' {{ 'to ' + dest_host if dest_host | length > 0 else '(scheduler-picked host)' }}.
+          (Pre-validation already confirmed this is safe to run.)
+
+    # ---------------------------------------------------------------
+    # COLD MIGRATION
+    # ---------------------------------------------------------------
+    - name: Trigger cold migration
+      ansible.builtin.command: >
+        openstack server migrate {{ vm_name }}
+        {{ '--host ' + dest_host if dest_host | length > 0 else '' }}
+        --wait --insecure
+      environment: "{{ auth_env }}"
+      register: cold_migrate_result
+      when: migration_type == 'cold'
+      changed_when: true
+
+    - name: Confirm resize after cold migration
+      ansible.builtin.command: >
+        openstack server resize confirm {{ vm_name }} --insecure
+      environment: "{{ auth_env }}"
+      when:
+        - migration_type == 'cold'
+        - confirm_resize | bool
+      changed_when: true
+
+    # ---------------------------------------------------------------
+    # LIVE MIGRATION
+    # ---------------------------------------------------------------
+    - name: Trigger live migration
+      ansible.builtin.command: >
+        openstack server migrate {{ vm_name }} --live-migration
+        {{ '--host ' + dest_host if dest_host | length > 0 else '' }}
+        {{ '--block-migration' if block_migration | bool else '' }}
+        --wait --insecure
+      environment: "{{ auth_env }}"
+      register: live_migrate_result
+      when: migration_type == 'live'
+      changed_when: true
+
+    - name: Re-fetch server details after migration
+      openstack.cloud.server_info:
+        cloud: "{{ os_cloud_name }}"
+        server: "{{ vm_name }}"
+      register: server_after
+
+    - name: Set post-migration facts
+      ansible.builtin.set_fact:
+        new_host: "{{ server_after.servers[0]['OS-EXT-SRV-ATTR:host'] | default('unknown') }}"
+        new_status: "{{ server_after.servers[0].status | default('unknown') }}"
+
+    - name: Set migration-succeeded fact
+      ansible.builtin.set_fact:
+        migration_succeeded: >-
+          {{ (dest_host | length == 0 or new_host == dest_host)
+             and new_status in ['ACTIVE', 'VERIFY_RESIZE'] }}
+
+    - name: DEBUG — final result
+      ansible.builtin.debug:
+        msg: >
+          {{ 'SUCCESS' if migration_succeeded else 'DID NOT MOVE / UNEXPECTED STATE' }}:
+          '{{ vm_name }}' — from '{{ current_host }}' to '{{ new_host }}'.
+          Final status: {{ new_status }}
+          {{ '(pending resize confirm)' if new_status == 'VERIFY_RESIZE' else '' }}
+
+    - name: Publish execution results as workflow artifacts
+      ansible.builtin.set_stats:
+        data:
+          migration_succeeded: "{{ migration_succeeded }}"
+          new_host: "{{ new_host }}"
+          new_status: "{{ new_status }}"
+        per_host: false

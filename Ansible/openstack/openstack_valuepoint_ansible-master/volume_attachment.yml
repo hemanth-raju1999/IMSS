@@ -1,0 +1,125 @@
+---
+- name: Attach OpenStack Volume to VM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # From AAP survey
+    vm_name: "{{ vm_name }}"
+    volume_name: "{{ volume_name }}"
+
+  tasks:
+    ###########################################################################
+    # 1. Confirm VM exists and capture its state
+    ###########################################################################
+    - name: Get VM info
+      openstack.cloud.server_info:
+        server: "{{ vm_name }}"
+      register: vm_info
+
+    - name: Fail if VM does not exist
+      assert:
+        that:
+          - vm_info.servers | length > 0
+        fail_msg: "VM '{{ vm_name }}' not found"
+        success_msg: "VM '{{ vm_name }}' found — proceeding"
+
+    - name: Capture VM facts
+      set_fact:
+        vm_status: "{{ vm_info.servers[0].status }}"
+        vm_id: "{{ vm_info.servers[0].id }}"
+
+    - name: Fail if VM is not in a valid state for attach
+      assert:
+        that:
+          - vm_status in ['ACTIVE', 'SHUTOFF']
+        fail_msg: "VM '{{ vm_name }}' is in state '{{ vm_status }}' — must be ACTIVE or SHUTOFF to attach a volume"
+        success_msg: "VM '{{ vm_name }}' is in a valid state ('{{ vm_status }}') for attach"
+
+    ###########################################################################
+    # 2. Confirm volume exists and is available (not already attached)
+    ###########################################################################
+    - name: Get volume info
+      openstack.cloud.volume_info:
+        name: "{{ volume_name }}"
+      register: existing_volume
+
+    - name: Fail if volume does not exist
+      assert:
+        that:
+          - existing_volume.volumes | length > 0
+        fail_msg: "Volume '{{ volume_name }}' not found"
+        success_msg: "Volume '{{ volume_name }}' found — proceeding"
+
+    - name: Capture volume facts
+      set_fact:
+        volume_id: "{{ existing_volume.volumes[0].id }}"
+        volume_status: "{{ existing_volume.volumes[0].status }}"
+
+    - name: Warn if volume is not available for attach
+      debug:
+        msg: "Volume '{{ volume_name }}' is '{{ volume_status }}' — skipping attach (must be 'available'; it may already be attached elsewhere)"
+      when: volume_status != 'available'
+
+    ###########################################################################
+    # 3. Attach the volume
+    ###########################################################################
+    - name: Attach volume to VM
+      openstack.cloud.server_volume:
+        state: present
+        server: "{{ vm_id }}"
+        volume: "{{ volume_id }}"
+        wait: true
+        timeout: 300
+      register: attach_result
+      when: volume_status == 'available'
+
+    ###########################################################################
+    # 4. Verify attachment
+    ###########################################################################
+    - name: Re-fetch volume info to confirm attachment
+      openstack.cloud.volume_info:
+        name: "{{ volume_name }}"
+      register: post_attach_volume
+      when: volume_status == 'available'
+
+    - name: Fail if volume did not reach 'in-use' state
+      assert:
+        that:
+          - post_attach_volume.volumes[0].status == 'in-use'
+        fail_msg: "Volume '{{ volume_name }}' did not reach 'in-use' state after attach — check manually"
+        success_msg: "Volume '{{ volume_name }}' successfully attached and is now 'in-use'"
+      when: volume_status == 'available'
+
+    ###########################################################################
+    # 5. Report result
+    ###########################################################################
+    - name: Display attach report
+      debug:
+        msg:
+          - "=========================================================="
+          - "                  VOLUME ATTACH REPORT"
+          - "=========================================================="
+          - "VM Name       : {{ vm_name }}"
+          - "Volume Name   : {{ volume_name }}"
+          - "Volume ID     : {{ volume_id }}"
+          - "Device Path   : {{ post_attach_volume.volumes[0].attachments[0].device | default('n/a - check manually') }}"
+          - "Status        : {{ post_attach_volume.volumes[0].status }}"
+          - "Result        : SUCCESS - volume attached"
+          - "=========================================================="
+      when: volume_status == 'available'
+
+    - name: Display skipped report
+      debug:
+        msg:
+          - "=========================================================="
+          - "                  VOLUME ATTACH REPORT"
+          - "=========================================================="
+          - "VM Name       : {{ vm_name }}"
+          - "Volume Name   : {{ volume_name }}"
+          - "Volume ID     : {{ volume_id }}"
+          - "Status        : {{ volume_status }}"
+          - "Result        : SKIPPED - volume was not available for attach"
+          - "=========================================================="
+      when: volume_status != 'available'
+

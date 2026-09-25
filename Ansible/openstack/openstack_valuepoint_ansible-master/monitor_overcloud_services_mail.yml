@@ -1,0 +1,239 @@
+---
+- name: Check TripleO Overcloud Service Health and Generate CSV Report
+  hosts: director
+  gather_facts: false
+  vars_files:
+    - monitor_vars.yml
+    - aap_creds.yml
+  vars:
+    report_dir: /nfs-tst/service_reports        # change here
+    report_filename_prefix: service_health_report
+   # mail_delegate_host: "ttl-devansiblehost-1"   # check
+
+  tasks:
+
+    # ========================================================
+    # STEP 1: Discover every overcloud node, its role, and its IP
+    # ========================================================
+
+    - name: Source stackrc and list baremetal nodes via metalsmith
+      ansible.builtin.shell:
+        cmd: "source ~/stackrc && metalsmith -f json list"
+        executable: /bin/bash
+      register: metalsmith_output
+      changed_when: false
+
+    - name: Parse metalsmith output
+      ansible.builtin.set_fact:
+        metalsmith_data: "{{ metalsmith_output.stdout | from_json }}"
+
+    - name: Build hostname-to-IP and hostname-to-role maps from metalsmith
+      ansible.builtin.set_fact:
+        host_ip_map: >-
+          {{
+            host_ip_map | default({})
+            | combine({
+                item.key: (item.value.ip_addresses.ctlplane | default([]) | first | default('NOT_FOUND'))
+              })
+          }}
+        host_role_map: >-
+          {{
+            host_role_map | default({})
+            | combine({
+                item.key: ('controller' if 'CTRL' in (item.value.allocation.resource_class | default('') | upper) else 'compute')
+              })
+          }}
+      loop: "{{ metalsmith_data | dict2items | rejectattr('key', 'search', '\\.') | list }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: Fail loudly if any node has no ctlplane IP in metalsmith
+      ansible.builtin.fail:
+        msg: >-
+          "{{ item.key }}" has no ctlplane IP under ip_addresses in
+          metalsmith's output - check that node's network config, or
+          whether it's using a differently-named network instead of
+          "ctlplane".
+      loop: "{{ host_ip_map | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: item.value == 'NOT_FOUND'
+
+    - name: Fail loudly if any hostname resolved to loopback
+      ansible.builtin.fail:
+        msg: >-
+          "{{ item.key }}" mapped to "{{ item.value }}" from metalsmith -
+          that's a loopback address, which shouldn't be possible from
+          Ironic's own inventory.
+      loop: "{{ host_ip_map | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: item.value is match('^127\.')
+
+    # ========================================================
+    # STEP 2: Build the service_checks list
+    # ========================================================
+
+    - name: Build per-host list with IP and role-appropriate services
+      ansible.builtin.set_fact:
+        host_list: >-
+          {{
+            host_list | default([])
+            + [{
+                'host': item.key,
+                'ip': item.value,
+                'services': (controller_services if host_role_map[item.key] == 'controller' else compute_services)
+              }]
+          }}
+      loop: "{{ host_ip_map | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: Flatten into service_checks (host, ip, service) pairs
+      ansible.builtin.set_fact:
+        service_checks: "{{ host_list | subelements('services') }}"
+
+    # ========================================================
+    # STEP 3: Run each service check as a command, using the IP
+    # ========================================================
+
+    - name: Check TripleO-managed service status via director
+      ansible.builtin.command:
+        cmd: >-
+          ssh -o StrictHostKeyChecking=no -o BatchMode=yes
+          tripleo-admin@{{ item.0.ip }}
+          "systemctl is-active tripleo_{{ item.1 }}"
+      register: service_status_raw
+      loop: "{{ service_checks }}"
+      loop_control:
+        label: "{{ item.0.host }} ({{ item.0.ip }}) - {{ item.1 }}"
+      changed_when: false
+      failed_when: false
+
+    # ========================================================
+    # STEP 4: Build the aggregated results list
+    # ========================================================
+
+    - name: Build service status results list
+      ansible.builtin.set_fact:
+        host_service_results: >-
+          {{
+            host_service_results | default([])
+            + [{
+                'host': item.item.0.host,
+                'ip': item.item.0.ip,
+                'role': host_role_map[item.item.0.host],
+                'service': item.item.1,
+                'status': item.stdout | trim if item.rc == 0 else 'unreachable_or_' + (item.stderr | trim | default('unknown'))
+              }]
+          }}
+      loop: "{{ service_status_raw.results }}"
+      loop_control:
+        label: "{{ item.item.0.host }} - {{ item.item.1 }}"
+
+    # ========================================================
+    # STEP 5: Write the CSV report, delegated to the report host
+    # ========================================================
+
+    - name: Get report timestamp
+      ansible.builtin.command:
+        cmd: date +%Y%m%d_%H%M%S
+      register: report_timestamp
+      changed_when: false
+      delegate_to: localhost
+
+    - name: Ensure report directory exists
+      ansible.builtin.file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+
+    - name: Write service health CSV report
+      ansible.builtin.copy:
+        dest: "{{ report_dir }}/{{ report_filename_prefix }}_{{ report_timestamp.stdout }}.csv"
+        content: |
+          host,ip,role,service,status
+          {% for row in host_service_results %}
+          {{ row.host }},{{ row.ip }},{{ row.role }},{{ row.service }},{{ row.status }}
+          {% endfor %}
+        mode: '0644'
+      delegate_to: localhost
+
+    - name: Show report location
+      ansible.builtin.debug:
+        msg: >-
+          CSV report written to
+          localhost:{{ report_dir }}/{{ report_filename_prefix }}_{{ report_timestamp.stdout }}.csv
+
+    # ========================================================
+    # STEP 6: Build the .eml message with the CSV attached
+    # ========================================================
+
+    - name: Base64-encode the CSV report for attachment
+      ansible.builtin.command:
+        cmd: "base64 -w 0 {{ report_dir }}/{{ report_filename_prefix }}_{{ report_timestamp.stdout }}.csv"
+      register: csv_base64
+      changed_when: false
+      delegate_to: localhost
+
+    - name: Render the raw .eml message
+      ansible.builtin.copy:
+        dest: "/tmp/{{ report_filename_prefix }}_{{ report_timestamp.stdout }}.eml"
+        mode: '0600'
+        content: |
+          From: shama.g@ariviti.com
+          To: venkatahemanth.raju@ariviti.com
+          #{% if mail_cc is defined %}Cc: {{ mail_cc | join(',') if mail_cc is iterable and mail_cc is not string else mail_cc }}
+          #{% endif %}
+          Subject: RHOSP - {{ report_timestamp.stdout }}
+          MIME-Version: 1.0
+          Content-Type: multipart/mixed; boundary="REPORTBOUNDARY"
+
+          --REPORTBOUNDARY
+          Content-Type: text/plain; charset="UTF-8"
+
+          Attached is the TripleO overcloud service health report
+          generated on {{ report_timestamp.stdout }}.
+
+          Total checks: {{ host_service_results | length }}
+
+          --REPORTBOUNDARY
+          Content-Type: text/csv; name="{{ report_filename_prefix }}_{{ report_timestamp.stdout }}.csv"
+          Content-Transfer-Encoding: base64
+          Content-Disposition: attachment; filename="{{ report_filename_prefix }}_{{ report_timestamp.stdout }}.csv"
+
+          {{ csv_base64.stdout }}
+
+          --REPORTBOUNDARY--
+      delegate_to: localhost
+
+    # ========================================================
+    # STEP 7: Send the mail via curl through the proxy
+    # ========================================================
+
+    - name: Send report email via curl (proxy + STARTTLS)
+      ansible.builtin.command:
+        cmd: >-
+          curl -v --proxy http://dcproxy.ttsl.com:8080
+          --proxy-user "ttsl-automation:{{ smtp_password }}"
+          --ssl-reqd
+          --mail-from "{{ mail_from }}"
+          --mail-rcpt "{{ mail_to }}"
+          --upload-file "/tmp/{{ report_filename_prefix }}_{{ report_timestamp.stdout }}.eml"
+          --user "{{ smtp_username }}:{{ smtp_password }}"
+          "smtp://smtp.office365.com:587"
+      register: mail_send_result
+      changed_when: false
+      no_log: true
+      delegate_to: localhost
+
+    - name: Show mail send result
+      ansible.builtin.debug:
+        msg: "Mail send return code: {{ mail_send_result.rc }}"
+
+    - name: Clean up temp .eml file
+      ansible.builtin.file:
+        path: "/tmp/{{ report_filename_prefix }}_{{ report_timestamp.stdout }}.eml"
+        state: absent
+      delegate_to: localhost

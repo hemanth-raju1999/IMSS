@@ -1,0 +1,28 @@
+---
+- name: OpenStack Resource Cleanup
+  hosts: localhost
+  gather_facts: false
+  vars:
+    router: "{{ router }}"
+  tasks:
+
+    ###################################################################
+    # Delete Router
+    ###################################################################
+
+    - name: Delete Router
+      openstack.cloud.router:
+        state: absent
+        name: "{{ router }}"
+      register: router_delete_result
+
+    - name: Display router deletion result (formatted)
+      debug:
+        msg:
+          - "=========================================================="
+          - "               ROUTER DELETION REPORT"
+          - "=========================================================="
+          - "Router Name   : {{ router }}"
+          - "Changed       : {{ router_delete_result.changed | default('n/a') }}"
+          - "Result        : {{ 'DELETED SUCCESSFULLY' if router_delete_result.changed else 'NOT FOUND / ALREADY ABSENT' }}"
+          - "=========================================================="

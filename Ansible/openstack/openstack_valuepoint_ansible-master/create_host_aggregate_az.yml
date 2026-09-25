@@ -1,0 +1,93 @@
+---
+- name: Create/Update OpenStack Host Aggregate (with optional Availability Zone)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # From AAP survey
+    aggregate_name: "{{ aggregate_name }}"
+    az: "{{ az | default('') }}"
+    compute_hosts: "{{ compute_hosts | default('') }}"
+
+  tasks:
+    ###########################################################################
+    # 1. Validate inputs
+    ###########################################################################
+    - name: Fail if aggregate_name is missing
+      assert:
+        that:
+          - aggregate_name is defined and aggregate_name | trim != ""
+        fail_msg: "'aggregate_name' is required — nothing to create"
+        success_msg: "'aggregate_name' provided — proceeding"
+
+    - name: Build host list from survey input
+      set_fact:
+        compute_host_list: "{{ compute_hosts.split(',') | map('trim') | reject('equalto', '') | list }}"
+      when: compute_hosts | trim != ""
+
+    ###########################################################################
+    # 2. Create or update the aggregate itself (name + AZ only, no hosts yet)
+    ###########################################################################
+    - name: Create/update host aggregate (set AZ if provided)
+      openstack.cloud.host_aggregate:
+        name: "{{ aggregate_name }}"
+        availability_zone: "{{ az if az | trim != '' else omit }}"
+        state: present
+      register: aggregate_info
+      
+    - name: DEBUG - inspect aggregate_info structure
+      debug:
+        var: aggregate_info
+
+    - name: Capture aggregate facts
+      set_fact:
+        aggregate_id: "{{ aggregate_info.aggregate.id | default('unknown') }}"
+        
+    ###########################################################################
+    # 3. Safely add hosts one at a time (skip, don't fail, on AZ conflict)
+    ###########################################################################
+    - name: Attempt to add each host to the aggregate
+      openstack.cloud.host_aggregate:
+        name: "{{ aggregate_name }}"
+        hosts: "{{ [item] }}"
+        state: present
+      loop: "{{ compute_host_list }}"
+      when: compute_host_list is defined
+      register: host_add_raw
+      failed_when: false
+
+    - name: Build per-host result summary
+      set_fact:
+        host_results: "{{ host_results | default([]) + [ {'host': item.item, 'status': ('ADDED' if item.get('extra_data') is none else 'SKIPPED - ' + (item.msg | default('AZ conflict or existing instances') | regex_search('Reason:.*', multiline=True) | default(item.msg, true))) } ] }}"
+      loop: "{{ host_add_raw.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: host_add_raw is defined
+
+  
+    ###########################################################################
+    # 4. Verify final aggregate state
+    ###########################################################################
+    - name: Fetch final aggregate details
+      openstack.cloud.host_aggregate_info:
+        name: "{{ aggregate_name }}"
+      register: final_aggregate
+
+    ###########################################################################
+    # 5. Report result
+    ###########################################################################
+    - name: Display host aggregate report
+      debug:
+        msg:
+          - "=========================================================="
+          - "               HOST AGGREGATE CREATION REPORT"
+          - "=========================================================="
+          - "Aggregate Name : {{ aggregate_name }}"
+          - "Aggregate ID   : {{ aggregate_id }}"
+          - "Availability Zone : {{ az if az | trim != '' else 'None (plain aggregate)' }}"
+          - "Hosts Requested : {{ compute_host_list | default([]) | join(', ') if compute_host_list is defined else 'None' }}"
+          - "Hosts Currently in Aggregate : {{ final_aggregate.host_aggregates[0].hosts | default([]) | join(', ') }}"
+          - "--- Per-Host Result ---"
+          - "{{ host_results | default([]) }}"
+          - "Result : {{ 'SUCCESS - all hosts added' if (host_results is defined and host_results | selectattr('status', 'search', '^ADDED') | list | length == host_results | length) else ('PARTIAL - see per-host results above' if host_results is defined else 'SUCCESS - aggregate created (no hosts requested)') }}"
+          - "=========================================================="

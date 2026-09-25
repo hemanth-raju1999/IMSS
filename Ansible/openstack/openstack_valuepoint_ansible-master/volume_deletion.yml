@@ -1,0 +1,142 @@
+---
+- name: Delete OpenStack Volume
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # From AAP survey
+    volume_name: "{{ volume_name }}"
+    take_snapshot: "{{ take_snapshot | default(true) }}"   
+
+  tasks:
+    ###########################################################################
+    # 1. Confirm volume exists
+    ###########################################################################
+    - name: Get volume info
+      openstack.cloud.volume_info:
+        name: "{{ volume_name }}"
+      register: existing_volume
+
+    - name: Fail if volume does not exist
+      assert:
+        that:
+          - existing_volume.volumes | length > 0
+        fail_msg: "Volume '{{ volume_name }}' not found — nothing to delete"
+        success_msg: "Volume '{{ volume_name }}' found — proceeding"
+
+    - name: Capture volume facts
+      set_fact:
+        volume_id: "{{ existing_volume.volumes[0].id }}"
+        volume_status: "{{ existing_volume.volumes[0].status }}"
+        volume_size: "{{ existing_volume.volumes[0].size }}"
+
+    ###########################################################################
+    # 2. Safety check: skip (don't fail) if volume is attached/in-use
+    ###########################################################################
+    - name: Warn and skip if volume is currently attached/in-use
+      debug:
+        msg: >-
+          Volume '{{ volume_name }}' is '{{ volume_status }}' — skipping delete.
+          Detach it from its instance first (Attach/Detach playbook) before deleting.
+      when: volume_status in ['in-use', 'attaching', 'detaching']
+
+    ###########################################################################
+    # 3. Optional: preserve data before deleting
+    ###########################################################################
+    - name: Create pre-delete snapshot
+      openstack.cloud.volume_snapshot:
+        state: present
+        display_name: "{{ volume_name }}-snap-{{ lookup('pipe', 'date +%Y%m%d%H%M%S') }}"
+        volume: "{{ volume_id }}"
+        wait: true
+        timeout: 600
+      register: snapshot_result
+      when:
+        - take_snapshot | bool
+        - volume_status not in ['in-use', 'attaching', 'detaching']
+
+    - name: Create independent backup volume from snapshot
+      openstack.cloud.volume:
+        state: present
+        display_name: "{{ volume_name }}-backup-{{ lookup('pipe', 'date +%Y%m%d%H%M%S') }}"
+        snapshot_id: "{{ snapshot_result.snapshot.id }}"
+        size: "{{ volume_size }}"
+        wait: true
+        timeout: 600
+      register: backup_volume_result
+      when:
+        - take_snapshot | bool
+        - volume_status not in ['in-use', 'attaching', 'detaching']
+        - snapshot_result is defined
+        - snapshot_result.snapshot is defined
+
+    - name: Delete the pre-delete snapshot (data now safely preserved in backup volume)
+      openstack.cloud.volume_snapshot:
+        state: absent
+        volume: "{{ volume_id }}"
+        name: "{{ snapshot_result.snapshot.id }}"
+        wait: true
+        timeout: 300
+      when:
+        - take_snapshot | bool
+        - volume_status not in ['in-use', 'attaching', 'detaching']
+        - snapshot_result is defined
+        - snapshot_result.snapshot is defined
+        - backup_volume_result is defined
+        - backup_volume_result.volume is defined
+
+    ###########################################################################
+    # 4. Delete the volume
+    ###########################################################################
+    - name: Delete the Cinder volume
+      openstack.cloud.volume:
+        state: absent
+        name: "{{ volume_id }}"
+        wait: true
+        timeout: 600
+      register: delete_result
+      when: volume_status not in ['in-use', 'attaching', 'detaching']
+
+    ###########################################################################
+    # 5. Verify deletion
+    ###########################################################################
+    - name: Verify volume no longer exists
+      openstack.cloud.volume_info:
+        name: "{{ volume_name }}"
+      register: post_delete_check
+      until: post_delete_check.volumes | length == 0
+      retries: 12
+      delay: 5
+      when: volume_status not in ['in-use', 'attaching', 'detaching']
+
+    ###########################################################################
+    # 6. Report result
+    ###########################################################################
+    - name: Display deletion report
+      debug:
+        msg:
+          - "=========================================================="
+          - "                  VOLUME DELETION REPORT"
+          - "=========================================================="
+          - "Volume Name    : {{ volume_name }}"
+          - "Volume ID      : {{ volume_id }}"
+          - "Size (GB)      : {{ volume_size }}"
+          - "Backup Volume  : {{ 'YES - ' + backup_volume_result.volume.name if (take_snapshot | bool and backup_volume_result is defined and backup_volume_result.volume is defined) else 'NO' }}"
+          - "Result         : SUCCESS - volume deleted"
+          - "=========================================================="
+      when: volume_status not in ['in-use', 'attaching', 'detaching']
+
+    - name: Display skipped report
+      debug:
+        msg:
+          - "=========================================================="
+          - "                  VOLUME DELETION REPORT"
+          - "=========================================================="
+          - "Volume Name    : {{ volume_name }}"
+          - "Volume ID      : {{ volume_id }}"
+          - "Size (GB)      : {{ volume_size }}"
+          - "Status         : {{ volume_status }}"
+          - "Result         : SKIPPED - volume is attached; detach it first"
+          - "=========================================================="
+      when: volume_status in ['in-use', 'attaching', 'detaching']
+

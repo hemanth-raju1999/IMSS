@@ -1,0 +1,228 @@
+---
+- name: OpenStack VM Migration — Pre-Validation
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - openstack_auth_vars.yml
+  vars:
+    vm_name: "{{ vm_name }}"
+    migration_type: "{{ migration_type | default('cold') }}"
+    dest_host: "{{ dest_host | default('') }}"
+    block_migration: "{{ block_migration | default(false) }}"
+    confirm_resize: "{{ confirm_resize | default(true) }}"
+    os_cloud_name: "{{ os_cloud | default('openstack') }}"
+
+  tasks:
+    - name: Check migration_type input is valid
+      ansible.builtin.set_fact:
+        migration_type_ok: "{{ migration_type in ['cold', 'live'] }}"
+
+    - name: DEBUG — migration_type check
+      ansible.builtin.debug:
+        msg: "migration_type='{{ migration_type }}' valid={{ migration_type_ok }} (must be 'cold' or 'live')"
+
+    - name: List enabled/up nova-compute services
+      ansible.builtin.command: >
+        openstack compute service list --service nova-compute -f json --insecure
+      environment: "{{ auth_env }}"
+      register: compute_services_raw
+      changed_when: false
+
+    - name: Parse compute service list
+      ansible.builtin.set_fact:
+        compute_hosts_all: "{{ compute_services_raw.stdout | from_json }}"
+
+    - name: Derive list of usable compute hosts (enabled + up)
+      ansible.builtin.set_fact:
+        compute_hosts_available: >-
+          {{ compute_hosts_all
+             | selectattr('Status', 'equalto', 'enabled')
+             | selectattr('State', 'equalto', 'up')
+             | map(attribute='Host')
+             | list }}
+
+    - name: Set multi-host availability fact
+      ansible.builtin.set_fact:
+        migration_possible: "{{ (compute_hosts_available | length) > 1 }}"
+
+    - name: DEBUG — compute host inventory
+      ansible.builtin.debug:
+        msg:
+          - "Total nova-compute services found : {{ compute_hosts_all | length }}"
+          - "Enabled + up compute hosts        : {{ compute_hosts_available }}"
+          - "Migration destinations possible   : {{ migration_possible }}"
+
+    - name: Fetch current server details
+      openstack.cloud.server_info:
+        cloud: "{{ os_cloud_name }}"
+        server: "{{ vm_name }}"
+      register: server_before
+
+    - name: Set VM-found fact
+      ansible.builtin.set_fact:
+        vm_found: "{{ (server_before.servers | length) > 0 }}"
+
+    - name: DEBUG — VM lookup
+      ansible.builtin.debug:
+        msg: "VM '{{ vm_name }}' found={{ vm_found }}"
+
+    - name: Set current host / status facts (VM found)
+      ansible.builtin.set_fact:
+        current_host: "{{ server_before.servers[0]['OS-EXT-SRV-ATTR:host'] | default('unknown') }}"
+        current_status: "{{ server_before.servers[0].status }}"
+        server_id: "{{ server_before.servers[0].id }}"
+        flavor_name: "{{ server_before.servers[0].flavor.original_name | default(server_before.servers[0].flavor.id) }}"
+      when: vm_found
+
+    - name: Set placeholder facts (VM not found)
+      ansible.builtin.set_fact:
+        current_host: "unknown"
+        current_status: "unknown"
+        server_id: "unknown"
+        flavor_name: "unknown"
+      when: not vm_found
+
+    - name: DEBUG — pre-migration state
+      ansible.builtin.debug:
+        msg: >
+          VM '{{ vm_name }}' ({{ server_id }}) is currently on host '{{ current_host }}',
+          status '{{ current_status }}'. Requested: {{ migration_type }} migration
+          {{ 'to ' + dest_host if dest_host | length > 0 else '(scheduler-picked host)' }}.
+
+    - name: Set VM-active fact
+      ansible.builtin.set_fact:
+        vm_active: "{{ vm_found and current_status == 'ACTIVE' }}"
+
+    - name: DEBUG — VM status check
+      ansible.builtin.debug:
+        msg: "VM must be ACTIVE to migrate. Current status: '{{ current_status }}', ok={{ vm_active }}"
+
+    - name: Set dest-host-differs fact
+      ansible.builtin.set_fact:
+        dest_host_ok: "{{ dest_host | length == 0 or dest_host != current_host }}"
+
+    - name: DEBUG — dest_host vs current_host
+      ansible.builtin.debug:
+        msg: "dest_host='{{ dest_host }}' current_host='{{ current_host }}' ok={{ dest_host_ok }}"
+      when: dest_host | length > 0
+
+    - name: Verify destination hypervisor is up (when dest_host supplied and multi-host)
+      ansible.builtin.command: >
+        openstack hypervisor show {{ dest_host }} -f json --insecure
+      environment: "{{ auth_env }}"
+      register: hv_check
+      changed_when: false
+      when:
+        - migration_possible
+        - dest_host | length > 0
+
+    - name: Parse hypervisor state and capacity stats
+      ansible.builtin.set_fact:
+        hv_state: "{{ (hv_check.stdout | from_json).state | default('down') }}"
+        hv_status: "{{ (hv_check.stdout | from_json).status | default('disabled') }}"
+        hv_vcpus: "{{ (hv_check.stdout | from_json).vcpus | default(0) | int }}"
+        hv_vcpus_used: "{{ (hv_check.stdout | from_json).vcpus_used | default(0) | int }}"
+        hv_memory_mb: "{{ (hv_check.stdout | from_json).memory_size | default(0) | int }}"
+        hv_memory_mb_used: "{{ (hv_check.stdout | from_json).memory_used | default(0) | int }}"
+      when:
+        - migration_possible
+        - dest_host | length > 0
+
+    - name: Set hypervisor-usable fact
+      ansible.builtin.set_fact:
+        hv_usable: "{{ (hv_state | default('down')) == 'up' and (hv_status | default('disabled')) == 'enabled' }}"
+      when:
+        - migration_possible
+        - dest_host | length > 0
+
+    - name: Set hypervisor-usable fact (n/a case)
+      ansible.builtin.set_fact:
+        hv_usable: true
+      when: not (migration_possible and dest_host | length > 0)
+
+    - name: DEBUG — hypervisor state
+      ansible.builtin.debug:
+        msg: "Destination host '{{ dest_host }}' state={{ hv_state | default('n/a') }} status={{ hv_status | default('n/a') }} usable={{ hv_usable }}"
+      when:
+        - migration_possible
+        - dest_host | length > 0
+
+    - name: Fetch flavor details for the VM
+      openstack.cloud.compute_flavor_info:
+        cloud: "{{ os_cloud_name }}"
+        name: "{{ flavor_name }}"
+      register: flavor_info
+      when:
+        - migration_possible
+        - dest_host | length > 0
+        - vm_found
+
+    - name: Set flavor requirement and headroom facts
+      ansible.builtin.set_fact:
+        req_vcpus: "{{ flavor_info.flavors[0].vcpus | default(0) | int }}"
+        req_ram_mb: "{{ flavor_info.flavors[0].ram | default(0) | int }}"
+        free_vcpus: "{{ (hv_vcpus | int) - (hv_vcpus_used | int) }}"
+        free_ram_mb: "{{ (hv_memory_mb | int) - (hv_memory_mb_used | int) }}"
+      when:
+        - migration_possible
+        - dest_host | length > 0
+        - vm_found
+
+    - name: Set capacity-ok fact
+      ansible.builtin.set_fact:
+        capacity_ok: "{{ (free_vcpus | default(0) | int) >= (req_vcpus | default(0) | int) and (free_ram_mb | default(0) | int) >= (req_ram_mb | default(0) | int) }}"
+      when:
+        - migration_possible
+        - dest_host | length > 0
+        - vm_found
+
+    - name: Set capacity-ok fact (n/a case)
+      ansible.builtin.set_fact:
+        capacity_ok: true
+      when: not (migration_possible and dest_host | length > 0 and vm_found)
+
+    - name: DEBUG — capacity comparison
+      ansible.builtin.debug:
+        msg:
+          - "Destination host        : {{ dest_host }}"
+          - "Free vCPUs / required    : {{ free_vcpus | default('n/a') }} / {{ req_vcpus | default('n/a') }}"
+          - "Free RAM(MB) / required  : {{ free_ram_mb | default('n/a') }} / {{ req_ram_mb | default('n/a') }}"
+          - "Capacity ok              : {{ capacity_ok }}"
+      when:
+        - migration_possible
+        - dest_host | length > 0
+        - vm_found
+
+    - name: Set overall proceed_migration gate
+      ansible.builtin.set_fact:
+        proceed_migration: "{{ migration_type_ok and migration_possible and vm_found and vm_active and dest_host_ok and hv_usable and capacity_ok }}"
+
+    - name: DEBUG — final pre-check summary
+      ansible.builtin.debug:
+        msg:
+          - "migration_type_ok : {{ migration_type_ok }}"
+          - "migration_possible: {{ migration_possible }}"
+          - "vm_found          : {{ vm_found }}"
+          - "vm_active         : {{ vm_active }}"
+          - "dest_host_ok      : {{ dest_host_ok }}"
+          - "hv_usable         : {{ hv_usable }}"
+          - "capacity_ok       : {{ capacity_ok }}"
+          - "==> proceed_migration = {{ proceed_migration }}"
+
+    - name: Publish pre-validation results as workflow artifacts
+      ansible.builtin.set_stats:
+        data:
+          proceed_migration: "{{ proceed_migration }}"
+          current_host: "{{ current_host }}"
+          current_status: "{{ current_status }}"
+          server_id: "{{ server_id }}"
+          compute_hosts_available: "{{ compute_hosts_available }}"
+        per_host: false
+
+    - name: Fail the job if pre-validation did not pass (drives workflow branching)
+      ansible.builtin.fail:
+        msg: >-
+          Pre-validation failed — see "final pre-check summary" above for
+          which check(s) did not pass. Migration job template will not run.
+      when: not proceed_migration

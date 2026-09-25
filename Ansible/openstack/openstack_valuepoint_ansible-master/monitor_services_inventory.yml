@@ -1,0 +1,176 @@
+---
+- name: Manage AAP Inventory, Groups, and Hosts
+  hosts: localhost
+  gather_facts: false
+  collections:
+    - ansible.controller
+  vars_files:
+    - monitor_vars.yml
+    - openstack_auth_vars.yml
+  vars:
+    csv_file: "/transfer-images/"
+    node_ssh_user: <provide user>
+    aap_host: "<url>"
+    aap_username: "<username>"
+    aap_password: "<passowrd>"
+    target_inventory_name: "<inventroy_name>"
+    target_organization: "<org_name>"
+    target_group_name: "<group_name>"
+  tasks:
+
+    # ========================================================
+    # STEP 1: Get OpenStack Compute Services
+    # ========================================================
+
+    - name: Get OpenStack compute service list
+      ansible.builtin.command:
+        cmd: openstack compute service list -f json --insecure
+      register: compute_service_output
+      changed_when: false
+      environment: "{{ auth_env }}"
+
+    # ========================================================
+    # STEP 2: Parse OpenStack output
+    # ========================================================
+
+    - name: Parse OpenStack compute service output
+      ansible.builtin.set_fact:
+        compute_service_data: "{{ compute_service_output.stdout | from_json }}"
+
+    # ========================================================
+    # STEP 3: Identify Compute Nodes
+    # ========================================================
+
+    - name: Identify Compute nodes
+      ansible.builtin.set_fact:
+        compute_nodes: >-
+          {{
+            compute_service_data
+            | selectattr('Binary', 'equalto', 'nova-compute')
+            | map(attribute='Host')
+            | list
+            | unique
+          }}
+
+    # ========================================================
+    # STEP 4: Identify Controller Nodes
+    # ========================================================
+
+    - name: Identify Controller nodes
+      ansible.builtin.set_fact:
+        controller_nodes: >-
+          {{
+            compute_service_data
+            | rejectattr('Binary', 'equalto', 'nova-compute')
+            | map(attribute='Host')
+            | list
+            | unique
+          }}
+
+    # ========================================================
+    # STEP 5: Display discovered nodes
+    # ========================================================
+
+    - name: Display Compute nodes
+      ansible.builtin.debug:
+        msg: "Compute Nodes: {{ compute_nodes }}"
+
+    - name: Display Controller nodes
+      ansible.builtin.debug:
+        msg: "Controller Nodes: {{ controller_nodes }}"
+
+    # ========================================================
+    # STEP 6: Build Controller container checks
+    # ========================================================
+
+    - name: Build Controller container list
+      ansible.builtin.set_fact:
+        controller_container_checks: >-
+          {{
+            controller_nodes
+            | product(controller_podman_containers)
+            | list
+          }}
+
+    # ========================================================
+    # STEP 7: Build Compute container checks
+    # ========================================================
+
+    - name: Build Compute container list
+      ansible.builtin.set_fact:
+        compute_container_checks: >-
+          {{
+            compute_nodes
+            | product(compute_podman_containers)
+            | list
+          }}
+
+    # ========================================================
+    # STEP 8: Combine all container checks
+    # ========================================================
+
+    - name: Combine Controller and Compute container checks
+      ansible.builtin.set_fact:
+        container_checks: >-
+          {{
+            controller_container_checks
+            + compute_container_checks
+          }}
+
+    # ========================================================
+    #  Static Inventory Creation
+    # ========================================================
+
+    - name: Ensure the inventory exists
+      ansible.controller.inventory:
+        name: "{{ target_inventory_name }}"
+        organization: "{{ target_organization }}"
+        state: present
+        controller_host: "{{ aap_host }}"
+        controller_username: "{{ aap_username }}"
+        controller_password: "{{ aap_password }}"
+        validate_certs: false
+        variables:
+          ansible_user: svc_ansible
+          ansible_become: true
+
+    - name: Create the group within the inventory
+      ansible.controller.group:
+        name: "{{ target_group_name }}"
+        inventory: "{{ target_inventory_name }}"
+        state: present
+        # Group-level variables applied to all members
+        variables:
+          ansible_user: svc_ansible
+          ansible_become: true
+        controller_host: "{{ aap_host }}"
+        controller_username: "{{ aap_username }}"
+        controller_password: "{{ aap_password }}"
+        validate_certs: false
+
+    - name: Add hosts to the inventory
+      ansible.controller.host:
+        name: "{{ item.name }}"
+        inventory: "{{ target_inventory_name }}"
+        state: present
+        # Host-level variables (e.g., specific IP addressing)
+        variables:
+          ansible_host: "{{ item.ip }}"
+        controller_host: "{{ aap_host }}"
+        controller_username: "{{ aap_username }}"
+        controller_password: "{{ aap_password }}"
+        validate_certs: false
+      loop: "{{ target_hosts }}"
+
+    - name: Associate the created hosts with the group
+      ansible.controller.group:
+        name: "{{ target_group_name }}"
+        inventory: "{{ target_inventory_name }}"
+        state: present
+        # Dynamically extracts just the names from the 'target_hosts' variable list
+        hosts: "{{ target_hosts | map(attribute='name') | list }}"
+        preserve_existing_hosts: true # Ensures existing group members are not removed
+        controller_host: "{{ aap_host }}"
+        controller_username: "{{ aap_username }}"
+        controller_password: "{{ aap_password }}"
+        validate_certs: false

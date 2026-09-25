@@ -1,0 +1,119 @@
+---
+- name: Create OpenStack VM (Static IP)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Get ports for the network
+      openstack.cloud.port_info:
+      register: port_info
+
+    - name: Check if requested IP is already in use
+      set_fact:
+        ip_in_use: >-
+          {{
+            port_info.ports
+            | selectattr('fixed_ips', 'defined')
+            | map(attribute='fixed_ips')
+            | flatten
+            | selectattr('ip_address', 'equalto', static_ip)
+            | list
+            | length > 0
+          }}
+
+    - name: Display message if IP is already in use
+      debug:
+        msg: "Requested IP {{ static_ip }} is already in use. Skipping VM creation."
+
+      when: ip_in_use
+
+    - name: Create port with static IP
+      openstack.cloud.port:
+        state: present
+        name: "{{ vm_name }}-port"
+        network: "{{ network }}"
+        fixed_ips:
+          - ip_address: "{{ static_ip }}"
+      register: vm_port
+      when: not ip_in_use
+
+    - name: Create VM with static IP
+      openstack.cloud.server:
+        state: present
+        name: "{{ vm_name }}"
+        image: "{{ image }}"
+        flavor: "{{ flavor }}"
+        availability_zone: "{{ az }}"
+        nics:
+          - port-id: "{{ vm_port.port.id }}"
+        boot_from_volume: false
+        terminate_volume: false
+        wait: true
+        timeout: 600
+        auto_ip: false
+      register: vm_result
+      when: not ip_in_use
+
+    - name: Display VM creation result (formatted)
+      debug:
+        msg:
+          - "=========================================================="
+          - "                  VM CREATION REPORT"
+          - "=========================================================="
+          - "Name        : {{ vm_result.server.name }}"
+          - "ID          : {{ vm_result.server.id }}"
+          - "Status      : {{ vm_result.server.status }}"
+          - "Flavor      : {{ vm_result.server.flavor.name }}"
+          - "Image       : {{ image }}"
+          - "AZ          : {{ vm_result.server.availability_zone }}"
+          - "Host        : {{ vm_result.server.host_id | default('n/a') }}"
+          - "Created     : {{ vm_result.server.created_at }}"
+          - "Requested Static IP : {{ static_ip }}"
+          - "Actual Assigned IP  : {{ vm_result.server.addresses.values() | list | flatten | map(attribute='addr') | list | join(', ') }}"
+          - "Networks    : {{ vm_result.server.addresses.keys() | list | join(', ') }}"
+          - "Key Pair    : {{ vm_result.server.key_name | default('none', true) }}"
+          - "Volumes     : {{ vm_result.server.attached_volumes | default([]) | map(attribute='id') | list | join(', ') if vm_result.server.attached_volumes else 'none' }}"
+          - "=========================================================="
+      when: not ip_in_use
+
+    - name: Warn if assigned IP does not match requested static IP
+      debug:
+        msg: >-
+          WARNING: Requested static IP {{ static_ip }}
+          was not assigned. Actual IP(s):
+          {{ vm_result.server.addresses.values()
+             | list
+             | flatten
+             | map(attribute='addr')
+             | list
+             | join(', ') }}
+      when:
+        - not ip_in_use
+        - static_ip not in (
+            vm_result.server.addresses.values()
+            | list
+            | flatten
+            | map(attribute='addr')
+            | list
+          )
+
+    - name: Publish VM facts as job artifacts
+      set_stats:
+        data:
+          vm_name: "{{ vm_result.server.name }}"
+          vm_id: "{{ vm_result.server.id }}"
+          status: "{{ vm_result.server.status }}"
+          flavor: "{{ vm_result.server.flavor.name }}"
+          image: "{{ image }}"
+          az: "{{ vm_result.server.availability_zone }}"
+          host: "{{ vm_result.server.host_id | default('n/a') }}"
+          created: "{{ vm_result.server.created_at }}"
+          network: "{{ network }}"
+          static_ip: "{{ static_ip }}"
+          ip: "{{ vm_result.server.addresses.values() | list | flatten | map(attribute='addr') | list | join(', ') }}"
+          key_name: "{{ vm_result.server.key_name | default('none', true) }}"
+          volumes: "{{ vm_result.server.attached_volumes | default([]) | map(attribute='id') | list | join(', ') if vm_result.server.attached_volumes else 'none' }}"
+        per_host: false
+      when: not ip_in_use
+

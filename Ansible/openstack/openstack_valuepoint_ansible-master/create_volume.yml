@@ -1,0 +1,52 @@
+---
+- name: Create OpenStack Volume
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # From AAP survey
+    volume_name: "{{ volume_name }}"
+    volume_type: "{{ volume_type }}"
+    volume_size: "{{ volume_size }}"
+
+  tasks:
+    - name: Check whether a volume with this name already exists
+      openstack.cloud.volume_info:
+        name: "{{ volume_name }}"
+      register: existing_volume
+
+    - name: Warn if volume name is already in use
+      debug:
+        msg: "A volume named '{{ volume_name }}' already exists (ID: {{ existing_volume.volumes[0].id }}) — skipping creation and reusing it"
+      when: existing_volume.volumes | length > 0
+
+    - name: Create a Cinder volume (only if it doesn't already exist)
+      openstack.cloud.volume:
+        state: present
+        display_name: "{{ volume_name }}"
+        size: "{{ volume_size }}"
+        volume_type: "{{ volume_type }}"
+        wait: true
+        timeout: 600
+      register: new_volume_info
+      when: existing_volume.volumes | length == 0
+
+    - name: Set final volume facts
+      set_fact:
+        volume_info: "{{ new_volume_info if (existing_volume.volumes | length == 0) else {'volume': existing_volume.volumes[0]} }}"
+        action_taken: "{{ 'CREATED' if (existing_volume.volumes | length == 0) else 'ALREADY EXISTED' }}"
+
+    - name: Display volume information
+      debug:
+        msg:
+          - "=========================================================="
+          - "                  VOLUME REPORT"
+          - "=========================================================="
+          - "Action      : {{ action_taken }}"
+          - "Volume Name : {{ volume_info.volume.name }}"
+          - "Volume ID   : {{ volume_info.volume.id }}"
+          - "Size (GB)   : {{ volume_info.volume.size }}"
+          - "Volume Type : {{ volume_info.volume.volume_type }}"
+          - "Status      : {{ volume_info.volume.status }}"
+          - "=========================================================="
+

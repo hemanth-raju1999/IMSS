@@ -1,0 +1,121 @@
+---
+- name: Resize (Extend) OpenStack Volume
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # From AAP survey
+    volume_name: "{{ volume_name }}"
+    new_size: "{{ new_size }}"   
+
+  tasks:
+    ###########################################################################
+    # 1. Confirm volume exists and capture its current state
+    ###########################################################################
+    - name: Get volume info
+      openstack.cloud.volume_info:
+        name: "{{ volume_name }}"
+      register: existing_volume
+
+    - name: Fail if volume does not exist
+      assert:
+        that:
+          - existing_volume.volumes | length > 0
+        fail_msg: "Volume '{{ volume_name }}' not found"
+        success_msg: "Volume '{{ volume_name }}' found — proceeding"
+
+    - name: Capture volume facts
+      set_fact:
+        volume_id: "{{ existing_volume.volumes[0].id }}"
+        volume_status: "{{ existing_volume.volumes[0].status }}"
+        current_size: "{{ existing_volume.volumes[0].size }}"
+
+    ###########################################################################
+    # 2. Validate the resize request itself
+    ###########################################################################
+    - name: Determine whether requested size is valid
+      set_fact:
+        is_valid_size: "{{ (new_size | int) > (current_size | int) }}"
+
+    - name: Warn and skip if new size is not greater than current size
+      debug:
+        msg: >-
+          Requested size ({{ new_size }}GB) is not greater than current size ({{ current_size }}GB)
+          — skipping resize. Cinder does not support shrinking or same-size resize.
+      when: not is_valid_size
+
+    ###########################################################################
+    # 3. Safety check: volume must be detached (available) to resize
+    ###########################################################################
+    - name: Warn and skip if volume is not available (must be detached to resize)
+      debug:
+        msg: >-
+          Volume '{{ volume_name }}' is '{{ volume_status }}' — skipping resize.
+          Detach it from its VM first (this driver does not support online extend).
+      when: volume_status != 'available' and is_valid_size
+    ###########################################################################
+    - name: Extend the volume to new size
+      openstack.cloud.volume:
+        state: present
+        name: "{{ volume_id }}"
+        size: "{{ new_size }}"
+        wait: true
+        timeout: 600
+      register: resize_result
+      when: volume_status == 'available' and is_valid_size
+
+    ###########################################################################
+    # 5. Verify resize
+    ###########################################################################
+    - name: Re-fetch volume info to confirm new size
+      openstack.cloud.volume_info:
+        name: "{{ volume_name }}"
+      register: post_resize_volume
+      until:
+        - post_resize_volume.volumes[0].size | int == new_size | int
+        - post_resize_volume.volumes[0].status not in ['extending', 'error_extending']
+      retries: 12
+      delay: 5
+      when: volume_status == 'available' and is_valid_size
+
+    - name: Fail if volume did not reach the requested size
+      assert:
+        that:
+          - post_resize_volume.volumes[0].size | int == new_size | int
+        fail_msg: "Volume '{{ volume_name }}' did not reach the requested size ({{ new_size }}GB) — check manually"
+        success_msg: "Volume '{{ volume_name }}' successfully resized to {{ new_size }}GB"
+      when: volume_status == 'available' and is_valid_size
+
+    ###########################################################################
+    # 6. Report result
+    ###########################################################################
+    - name: Display resize report
+      debug:
+        msg:
+          - "=========================================================="
+          - "                  VOLUME RESIZE REPORT"
+          - "=========================================================="
+          - "Volume Name    : {{ volume_name }}"
+          - "Volume ID      : {{ volume_id }}"
+          - "Previous Size  : {{ current_size }}GB"
+          - "New Size       : {{ post_resize_volume.volumes[0].size }}GB"
+          - "Status         : {{ post_resize_volume.volumes[0].status }}"
+          - "Result         : SUCCESS - volume resized"
+          - "=========================================================="
+      when: volume_status == 'available' and is_valid_size
+
+    - name: Display skipped report
+      debug:
+        msg:
+          - "=========================================================="
+          - "                  VOLUME RESIZE REPORT"
+          - "=========================================================="
+          - "Volume Name    : {{ volume_name }}"
+          - "Volume ID      : {{ volume_id }}"
+          - "Current Size   : {{ current_size }}GB"
+          - "Requested Size : {{ new_size }}GB"
+          - "Status         : {{ volume_status }}"
+          - "Result         : SKIPPED - {{ 'volume must be detached (available) to resize' if volume_status != 'available' else 'requested size (' + (new_size | string) + 'GB) not greater than current size (' + (current_size | string) + 'GB)' }}"
+          - "=========================================================="
+      when: volume_status != 'available' or not is_valid_size
+

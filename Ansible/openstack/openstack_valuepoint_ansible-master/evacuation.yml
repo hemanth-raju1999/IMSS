@@ -1,0 +1,72 @@
+---
+- name: Evacuate instances from a failed compute host
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - openstack_auth_vars.yml
+  vars:
+    failed_host: "{{ failed_host }}"
+    target_host: "{{ target_host }}"
+    cloud_name: "{{ cloud_name }}"
+
+  tasks:
+    - name: Confirm compute service is actually down
+      ansible.builtin.command:
+        cmd: openstack --os-cloud {{ cloud_name }} compute service list -f json
+      register: svc_list
+      changed_when: false
+      environment: "{{ auth_env }}"
+
+    # - name: Force the compute service down (if not already)
+    #   ansible.builtin.command:
+    #     cmd: >
+    #       openstack --os-cloud {{ cloud_name }} compute service set
+    #       {{ failed_host }} nova-compute --down
+    #   when: "'down' not in svc_list.stdout"
+    #   environment: "{{ auth_env }}"
+
+    - name: Get list of instances on the failed host
+      ansible.builtin.command:
+        cmd: >
+          openstack --os-cloud {{ cloud_name }} server list
+          --host {{ failed_host }} -f json --all-projects
+      register: server_list
+      changed_when: false
+      environment: "{{ auth_env }}"
+
+    - name: Evacuate all instances from the failed host
+      ansible.builtin.command:
+        cmd: >
+          nova --os-cloud {{ cloud_name }} host-evacuate {{ failed_host }}
+          {{ '--target_host ' + target_host if target_host is defined else '' }}
+      register: evac_result
+      environment: "{{ auth_env }}"
+
+    - name: Show evacuation result
+      ansible.builtin.debug:
+        var: evac_result.stdout
+        
+################################################
+# For Single Instance
+################################################
+
+    # - name: Evacuate a single instance
+    #   ansible.builtin.command:
+    #     cmd: >
+    #       openstack --os-cloud {{ cloud_name }} server evacuate
+    #       {{ server_name }} {{ '--host ' + target_host if target_host is defined else '' }}
+    #   environment: "{{ auth_env }}"
+      
+    # - name: Evacuate instance via Nova API
+    #   ansible.builtin.uri:
+    #     url: "{{ nova_endpoint }}/servers/{{ server_id }}/action"
+    #     method: POST
+    #     headers:
+    #       X-Auth-Token: "{{ auth_token }}"
+    #       Content-Type: "application/json"
+    #     body_format: json
+    #     body:
+    #       evacuate:
+    #         host: "{{ target_host }}"
+    #         force: true
+    #     status_code: 200

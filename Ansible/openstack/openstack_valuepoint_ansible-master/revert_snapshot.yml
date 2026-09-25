@@ -1,0 +1,47 @@
+---
+- name: Revert RHOSP Snapshots
+  hosts: director
+  gather_facts: false
+
+  vars_files:
+    - vars/backup_vars.yml
+
+  tasks:
+
+    - name: Confirm revert operation
+      ansible.builtin.pause:
+        prompt: |
+          WARNING:
+          This will revert the RHOSP Controller and Compute nodes
+          to the state captured by the snapshot.
+
+          Type 'REVERT' to continue
+      register: revert_confirmation
+
+    - name: Abort if confirmation is not provided
+      ansible.builtin.fail:
+        msg: "Snapshot revert cancelled."
+      when: revert_confirmation.user_input != "REVERT"
+
+    - name: Revert RHOSP snapshots
+      ansible.builtin.shell: |
+        source "{{ stackrc_file }}"
+
+        openstack overcloud backup snapshot \
+          --revert \
+          --inventory "{{ tripleo_inventory }}"
+      args:
+        executable: /bin/bash
+      register: revert_result
+
+    - name: Display revert result
+      ansible.builtin.debug:
+        var: revert_result.stdout_lines
+
+    - name: Inform operator about reboot
+      ansible.builtin.debug:
+        msg: >
+          Snapshot revert completed. Red Hat documentation states that
+          each reverted node must be rebooted for the filesystem changes
+          to be applied.
+          

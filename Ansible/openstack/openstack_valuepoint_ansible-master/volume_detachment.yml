@@ -1,0 +1,123 @@
+---
+- name: Detach OpenStack Volume from VM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # From AAP survey
+    vm_name: "{{ vm_name }}"
+    volume_name: "{{ volume_name }}"
+
+  tasks:
+    ###########################################################################
+    # 1. Confirm VM exists
+    ###########################################################################
+    - name: Get VM info
+      openstack.cloud.server_info:
+        server: "{{ vm_name }}"
+      register: vm_info
+
+    - name: Fail if VM does not exist
+      assert:
+        that:
+          - vm_info.servers | length > 0
+        fail_msg: "VM '{{ vm_name }}' not found"
+        success_msg: "VM '{{ vm_name }}' found — proceeding"
+
+    - name: Capture VM facts
+      set_fact:
+        vm_id: "{{ vm_info.servers[0].id }}"
+
+    ###########################################################################
+    # 2. Confirm volume exists and capture its state/attachment
+    ###########################################################################
+    - name: Get volume info
+      openstack.cloud.volume_info:
+        name: "{{ volume_name }}"
+      register: existing_volume
+
+    - name: Fail if volume does not exist
+      assert:
+        that:
+          - existing_volume.volumes | length > 0
+        fail_msg: "Volume '{{ volume_name }}' not found"
+        success_msg: "Volume '{{ volume_name }}' found — proceeding"
+
+    - name: Capture volume facts
+      set_fact:
+        volume_id: "{{ existing_volume.volumes[0].id }}"
+        volume_status: "{{ existing_volume.volumes[0].status }}"
+        volume_attachments: "{{ existing_volume.volumes[0].attachments }}"
+
+    - name: Determine whether this volume is attached to the given VM
+      set_fact:
+        is_attached_to_this_vm: "{{ volume_attachments | selectattr('server_id', 'equalto', vm_id) | list | length > 0 }}"
+
+    - name: Warn and skip if volume is not attached to this VM
+      debug:
+        msg: >-
+          Volume '{{ volume_name }}' is '{{ volume_status }}' and is not currently attached to VM '{{ vm_name }}'
+          — skipping detach (either already detached, or attached to a different VM)
+      when: not is_attached_to_this_vm
+
+    ###########################################################################
+    # 3. Detach the volume
+    ###########################################################################
+    - name: Detach volume from VM
+      openstack.cloud.server_volume:
+        state: absent
+        server: "{{ vm_id }}"
+        volume: "{{ volume_id }}"
+        wait: true
+        timeout: 300
+      register: detach_result
+      when: is_attached_to_this_vm
+
+    ###########################################################################
+    # 4. Verify detachment
+    ###########################################################################
+    - name: Re-fetch volume info to confirm detachment
+      openstack.cloud.volume_info:
+        name: "{{ volume_name }}"
+      register: post_detach_volume
+      when: is_attached_to_this_vm
+
+    - name: Fail if volume did not return to 'available' state
+      assert:
+        that:
+          - post_detach_volume.volumes[0].status == 'available'
+        fail_msg: "Volume '{{ volume_name }}' did not return to 'available' state after detach — check manually"
+        success_msg: "Volume '{{ volume_name }}' successfully detached and is now 'available'"
+      when: is_attached_to_this_vm
+
+    ###########################################################################
+    # 5. Report result
+    ###########################################################################
+    - name: Display detach report
+      debug:
+        msg:
+          - "=========================================================="
+          - "                  VOLUME DETACH REPORT"
+          - "=========================================================="
+          - "VM Name       : {{ vm_name }}"
+          - "Volume Name   : {{ volume_name }}"
+          - "Volume ID     : {{ volume_id }}"
+          - "Status        : {{ post_detach_volume.volumes[0].status }}"
+          - "Result        : SUCCESS - volume detached"
+          - "=========================================================="
+      when: is_attached_to_this_vm
+
+    - name: Display skipped report
+      debug:
+        msg:
+          - "=========================================================="
+          - "                  VOLUME DETACH REPORT"
+          - "=========================================================="
+          - "VM Name       : {{ vm_name }}"
+          - "Volume Name   : {{ volume_name }}"
+          - "Volume ID     : {{ volume_id }}"
+          - "Status        : {{ volume_status }}"
+          - "Result        : SKIPPED - volume was not attached to this VM"
+          - "=========================================================="
+      when: not is_attached_to_this_vm
+

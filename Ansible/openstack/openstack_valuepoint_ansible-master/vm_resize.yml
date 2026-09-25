@@ -1,0 +1,200 @@
+---
+- name: Resize OpenStack VM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/openstack_auth.yml
+  vars:
+    # From AAP survey
+    vm_name: "{{ vm_name }}"
+    new_flavor: "{{ new_flavor }}"
+    allow_downsize: false
+    
+    # From Ansible vault
+    auth_env:
+      OS_AUTH_URL: "{{ vault_os_auth_url }}"
+      OS_USERNAME: "{{ vault_os_username }}"
+      OS_PASSWORD: "{{ vault_os_password }}"
+      OS_PROJECT_NAME: "{{ vault_os_project_name }}"
+      OS_USER_DOMAIN_NAME: "{{ vault_os_user_domain_name }}"
+      OS_PROJECT_DOMAIN_NAME: "{{ vault_os_project_domain_name }}"
+      OS_IDENTITY_API_VERSION: "{{ vault_os_identity_api_version }}"
+
+  tasks:
+    ###########################################################################
+    # 1. Confirm VM exists and capture its current state
+    ###########################################################################
+    - name: Get current VM information
+      openstack.cloud.server_info:
+        server: "{{ vm_name }}"
+      register: vm_info
+
+    - name: Fail if VM does not exist
+      assert:
+        that:
+          - vm_info.servers | length > 0
+        fail_msg: "VM '{{ vm_name }}' not found"
+        success_msg: "VM '{{ vm_name }}' found — proceeding"
+
+    - name: Display current VM status
+      debug:
+        msg:
+          - "Status : {{ vm_info.servers[0].status }}"
+          - "Flavor : {{ vm_info.servers[0].flavor.original_name }}"
+
+    ###########################################################################
+    # 2. Confirm previous resize if pending, then refresh VM info
+    ###########################################################################
+    - name: Confirm pending resize
+      command: >
+        openstack server resize confirm {{ vm_name }}
+      environment: "{{ auth_env }}"
+      when: vm_info.servers[0].status == "VERIFY_RESIZE"
+
+    - name: Wait until VM becomes ACTIVE or SHUTOFF after any pending confirm
+      openstack.cloud.server_info:
+        server: "{{ vm_name }}"
+      register: vm_state
+      retries: 30
+      delay: 5
+      until:
+        - vm_state.servers is defined
+        - vm_state.servers | length > 0
+        - vm_state.servers[0].status in ['ACTIVE', 'SHUTOFF']
+      when: vm_info.servers[0].status == "VERIFY_RESIZE"
+
+    - name: Refresh VM information
+      openstack.cloud.server_info:
+        server: "{{ vm_name }}"
+      register: vm_info
+
+    - name: Capture original VM status (to restore same state after resize)
+      set_fact:
+        original_status: "{{ vm_info.servers[0].status }}"
+        current_flavor_name: "{{ vm_info.servers[0].flavor.original_name }}"
+
+    ###########################################################################
+    # 3. Confirm target flavor exists and capture specs for comparison
+    ###########################################################################
+    - name: Get current flavor details
+      openstack.cloud.compute_flavor_info:
+        name: "{{ current_flavor_name }}"
+      register: current_flavor_info
+
+    - name: Get target flavor details
+      openstack.cloud.compute_flavor_info:
+        name: "{{ new_flavor }}"
+      register: target_flavor_info
+
+    - name: Fail if target flavor does not exist
+      assert:
+        that:
+          - target_flavor_info.flavors | length > 0
+        fail_msg: "Flavor '{{ new_flavor }}' not found in OpenStack — check the flavor name"
+        success_msg: "Flavor '{{ new_flavor }}' found — proceeding"
+
+    - name: Capture current and target flavor specs
+      set_fact:
+        current_vcpus: "{{ current_flavor_info.flavors[0].vcpus }}"
+        current_ram: "{{ current_flavor_info.flavors[0].ram }}"
+        current_disk: "{{ current_flavor_info.flavors[0].disk }}"
+        target_vcpus: "{{ target_flavor_info.flavors[0].vcpus }}"
+        target_ram: "{{ target_flavor_info.flavors[0].ram }}"
+        target_disk: "{{ target_flavor_info.flavors[0].disk }}"
+
+    ###########################################################################
+    # 4. Validate the resize request — never hard-fail, just determine
+    #    whether it's safe to proceed and record why if not.
+    ###########################################################################
+    - name: Determine validity of requested resize
+      set_fact:
+        same_flavor: "{{ current_flavor_name == new_flavor }}"
+        disk_shrink: "{{ target_disk | int < current_disk | int }}"
+        is_downsize: "{{ (target_vcpus | int < current_vcpus | int) or (target_ram | int < current_ram | int) }}"
+
+    - name: Determine whether resize should proceed
+      set_fact:
+        proceed_resize: "{{ (not same_flavor) and (not disk_shrink) and ((not is_downsize) or allow_downsize) }}"
+
+    - name: Determine skip reason (if any)
+      set_fact:
+        skip_reason: >-
+          {{
+            'target flavor is the same as current flavor — nothing to do' if same_flavor else
+            ('target disk (' + (target_disk | string) + ' GB) is smaller than current disk (' + (current_disk | string) + ' GB) — OpenStack/Nova does not support shrinking the root disk') if disk_shrink else
+            ('target flavor is smaller in vCPU/RAM (' + (target_vcpus | string) + ' vCPU / ' + (target_ram | string) + ' MB vs current ' + (current_vcpus | string) + ' vCPU / ' + (current_ram | string) + ' MB) and allow_downsize is false') if (is_downsize and not allow_downsize) else
+            'none'
+          }}
+      when: not proceed_resize
+
+    ###########################################################################
+    # 5. Resize only if validation passed
+    ###########################################################################
+    - name: Resize VM
+      command: >
+        openstack server resize
+        --flavor {{ new_flavor }}
+        {{ vm_name }}
+      environment: "{{ auth_env }}"
+      when: proceed_resize
+
+    - name: Wait for VERIFY_RESIZE
+      command: >
+        openstack server show {{ vm_name }} -f value -c status
+      environment: "{{ auth_env }}"
+      register: resize_status
+      retries: 30
+      delay: 5
+      until: resize_status.stdout == "VERIFY_RESIZE"
+      when: proceed_resize
+
+    - name: Confirm resize
+      command: >
+        openstack server resize confirm {{ vm_name }}
+      environment: "{{ auth_env }}"
+      when: proceed_resize
+
+    - name: Wait until VM returns to its original status (ACTIVE or SHUTOFF)
+      openstack.cloud.server_info:
+        server: "{{ vm_name }}"
+      register: final_vm
+      retries: 30
+      delay: 5
+      until:
+        - final_vm.servers is defined
+        - final_vm.servers | length > 0
+        - final_vm.servers[0].status == original_status
+      when: proceed_resize
+
+    ###########################################################################
+    # 6. Report result
+    ###########################################################################
+    - name: Display resize success report
+      debug:
+        msg:
+          - "=========================================================="
+          - "                  VM RESIZE REPORT"
+          - "=========================================================="
+          - "VM Name         : {{ vm_name }}"
+          - "Previous Flavor : {{ current_flavor_name }} ({{ current_vcpus }} vCPU / {{ current_ram }} MB RAM / {{ current_disk }} GB Disk)"
+          - "New Flavor      : {{ final_vm.servers[0].flavor.original_name }} ({{ target_vcpus }} vCPU / {{ target_ram }} MB RAM / {{ target_disk }} GB Disk)"
+          - "VM Status       : {{ final_vm.servers[0].status }}"
+          - "Result          : SUCCESS - VM resized"
+          - "=========================================================="
+      when: proceed_resize
+
+    - name: Display skipped report
+      debug:
+        msg:
+          - "=========================================================="
+          - "                  VM RESIZE REPORT"
+          - "=========================================================="
+          - "VM Name         : {{ vm_name }}"
+          - "Current Flavor  : {{ current_flavor_name }} ({{ current_vcpus }} vCPU / {{ current_ram }} MB RAM / {{ current_disk }} GB Disk)"
+          - "Requested Flavor: {{ new_flavor }} ({{ target_vcpus }} vCPU / {{ target_ram }} MB RAM / {{ target_disk }} GB Disk)"
+          - "VM Status       : {{ original_status }}"
+          - "Result          : SKIPPED - {{ skip_reason }}"
+          - "=========================================================="
+      when: not proceed_resize
+

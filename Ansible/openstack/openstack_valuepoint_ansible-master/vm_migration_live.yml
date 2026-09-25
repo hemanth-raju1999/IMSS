@@ -1,0 +1,111 @@
+---
+- name: OpenStack VM Live Migration
+  hosts: localhost
+  gather_facts: false
+  vars:
+    cloud_name: ansible-cloud
+    vm_name: ansible-test
+    destination_host: compute-2
+
+  tasks:
+
+    - name: Get VM details before migration
+      ansible.builtin.command:
+        cmd: >
+          openstack --os-cloud {{ cloud_name }}
+          server show {{ vm_name }} -f json
+      register: vm_before
+      changed_when: false
+      environment: "{{ auth_env }}"
+
+    - name: Extract current compute host
+      ansible.builtin.set_fact:
+        source_host: "{{ (vm_before.stdout | from_json)['OS-EXT-SRV-ATTR:host'] }}"
+        vm_status: "{{ (vm_before.stdout | from_json)['status'] }}"
+
+    - name: Display migration information
+      ansible.builtin.debug:
+        msg:
+          - "VM Name       : {{ vm_name }}"
+          - "VM Status     : {{ vm_status }}"
+          - "Source Host   : {{ source_host }}"
+          - "Destination   : {{ destination_host }}"
+
+    - name: Validate VM is ACTIVE
+      ansible.builtin.assert:
+        that:
+          - vm_status == "ACTIVE"
+        fail_msg: "VM {{ vm_name }} is not ACTIVE. Current status: {{ vm_status }}"
+
+    - name: Validate source and destination are different
+      ansible.builtin.assert:
+        that:
+          - source_host != destination_host
+        fail_msg: "Source and destination hosts are the same."
+
+    - name: Perform live migration
+      ansible.builtin.command:
+        cmd: >
+          openstack --os-cloud {{ cloud_name }}
+          server migrate
+          --live-migration
+          --host {{ destination_host }}
+          {{ vm_name }}
+      register: migration_result
+      environment: "{{ auth_env }}"
+
+    - name: Display migration command result
+      ansible.builtin.debug:
+        var: migration_result.stdout
+
+    - name: Wait for VM to become ACTIVE
+      ansible.builtin.command:
+        cmd: >
+          openstack --os-cloud {{ cloud_name }}
+          server show {{ vm_name }}
+          -f value -c status --insecure
+      register: vm_status_check
+      until: vm_status_check.stdout | trim == "ACTIVE"
+      retries: 30
+      delay: 10
+      changed_when: false
+      environment: "{{ auth_env }}"
+
+    - name: Get VM details after migration
+      ansible.builtin.command:
+        cmd: >
+          openstack --os-cloud {{ cloud_name }}
+          server show {{ vm_name }} -f json --insecure
+      register: vm_after
+      changed_when: false
+      environment: "{{ auth_env }}"
+
+    - name: Extract destination host
+      ansible.builtin.set_fact:
+        final_host: "{{ (vm_after.stdout | from_json)['OS-EXT-SRV-ATTR:host'] }}"
+
+    - name: Display migration result
+      ansible.builtin.debug:
+        msg:
+          - "========================================"
+          - "       MIGRATION RESULT"
+          - "========================================"
+          - "VM Name        : {{ vm_name }}"
+          - "Previous Host  : {{ source_host }}"
+          - "Current Host   : {{ final_host }}"
+          - "VM Status      : {{ vm_status_check.stdout | trim }}"
+          - "========================================"
+
+    - name: Validate migration
+      ansible.builtin.assert:
+        that:
+          - final_host == destination_host
+          - vm_status_check.stdout | trim == "ACTIVE"
+        fail_msg: >
+          Migration validation failed.
+          Expected host={{ destination_host }},
+          Actual host={{ final_host }}
+        success_msg: >
+          VM {{ vm_name }} successfully migrated from
+          {{ source_host }} to {{ final_host }}.
+          

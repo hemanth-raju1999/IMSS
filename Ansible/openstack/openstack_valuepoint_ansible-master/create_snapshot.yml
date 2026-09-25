@@ -1,0 +1,58 @@
+---
+- name: Create RHOSP Controller and Compute Node Snapshots
+  hosts: director
+  gather_facts: false
+
+  vars_files:
+    - vars/backup_vars.yml
+
+  tasks:
+
+    - name: Verify stackrc exists
+      ansible.builtin.stat:
+        path: "{{ stackrc_file }}"
+      register: stackrc_check
+
+    - name: Fail if stackrc is missing
+      ansible.builtin.fail:
+        msg: "stackrc file not found at {{ stackrc_file }}"
+      when: not stackrc_check.stat.exists
+
+    - name: Verify TripleO inventory exists
+      ansible.builtin.stat:
+        path: "{{ tripleo_inventory }}"
+      register: inventory_check
+
+    - name: Fail if TripleO inventory is missing
+      ansible.builtin.fail:
+        msg: "TripleO inventory not found at {{ tripleo_inventory }}"
+      when: not inventory_check.stat.exists
+
+    - name: Check LVM logical volumes on director
+      ansible.builtin.command:
+        cmd: lvs
+      register: lvs_output
+      changed_when: false
+
+    - name: Display LVM configuration
+      ansible.builtin.debug:
+        var: lvs_output.stdout_lines
+
+    - name: Create RHOSP snapshots
+      ansible.builtin.shell: |
+        source "{{ stackrc_file }}"
+
+        openstack overcloud backup snapshot \
+          --inventory "{{ tripleo_inventory }}"
+      args:
+        executable: /bin/bash
+      register: snapshot_result
+
+    - name: Display snapshot command output
+      ansible.builtin.debug:
+        var: snapshot_result.stdout_lines
+
+    - name: Display snapshot errors
+      ansible.builtin.debug:
+        var: snapshot_result.stderr_lines
+      when: snapshot_result.stderr | length > 0

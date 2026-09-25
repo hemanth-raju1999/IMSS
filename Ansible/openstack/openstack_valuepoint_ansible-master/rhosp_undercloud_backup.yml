@@ -1,0 +1,131 @@
+---
+- name: Run undercloud backup from the director (ReaR via openstack undercloud backup)
+  hosts: director
+  gather_facts: false
+
+  vars:
+    tripleo_backup_and_restore_server: ""              # backup/NFS server IP or FQDN (NOT the director)
+    backup_nfs_path: /image-transfer                    # local mount point on the director (NFS-mounted from the backup server)
+    tripleo_backup_and_restore_shared_storage_folder: "{{ backup_nfs_path }}"
+
+    bar_vars_file: /home/stack/bar-vars.yaml
+    tripleo_inventory_file: /home/stack/tripleo-inventory.yaml
+    setup_rear: true                                     # set false on repeat runs to skip ReaR reinstall/reconfig
+    backup_marker: "/home/stack/.undercloud_backup_start_{{ report_timestamp.stdout }}"
+
+  tasks:
+    # ------------------------------------------------------------------ prechecks
+    - name: Get report timestamp
+      ansible.builtin.command:
+        cmd: date +%Y%m%d_%H%M%S
+      register: report_timestamp
+      changed_when: false
+
+    - name: Verify backup server variable is set
+      ansible.builtin.assert:
+        that: tripleo_backup_and_restore_server | length > 0
+        fail_msg: "Set tripleo_backup_and_restore_server (a separate backup/NFS host - not the director)"
+        quiet: true
+
+    - name: Warn if backup server appears to be the director itself
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: tripleo_backup_and_restore_server ({{ tripleo_backup_and_restore_server }})
+          matches this host's address. The undercloud backup target must be a SEPARATE host,
+          or this backup will be unusable if the director is lost.
+      when: tripleo_backup_and_restore_server in (ansible_all_ipv4_addresses | default([]))
+
+    - name: Verify NFS share is mounted on the director
+      ansible.builtin.command:
+        cmd: "findmnt --noheadings --output FSTYPE --target {{ backup_nfs_path }}"
+      register: nfs_mount_check
+      changed_when: false
+      failed_when: "'nfs' not in nfs_mount_check.stdout"
+
+    - name: Check if the tripleo inventory file exists
+      ansible.builtin.stat:
+        path: "{{ tripleo_inventory_file }}"
+      register: tripleo_inventory_stat
+
+    - name: Generate tripleo inventory file if missing
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          source ~/stackrc
+          tripleo-ansible-inventory --static-yaml-inventory {{ tripleo_inventory_file }} --stack overcloud
+        executable: /bin/bash
+      when: not tripleo_inventory_stat.stat.exists
+      changed_when: true
+
+    # ------------------------------------------------------------------ bar-vars.yaml
+    - name: Generate bar-vars.yaml for ReaR
+      ansible.builtin.copy:
+        dest: "{{ bar_vars_file }}"
+        content: |
+          tripleo_backup_and_restore_server: "{{ tripleo_backup_and_restore_server }}"
+          tripleo_backup_and_restore_shared_storage_folder: "{{ tripleo_backup_and_restore_shared_storage_folder }}"
+        mode: "0600"
+        backup: true
+
+    # ------------------------------------------------------------------ backup
+    - name: Create start marker for the post-check
+      ansible.builtin.file:
+        path: "{{ backup_marker }}"
+        state: touch
+        modification_time: now
+      changed_when: false
+
+    - name: Run undercloud backup (with ReaR setup)
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          source ~/stackrc
+          openstack undercloud backup {{ '--setup-rear' if setup_rear else '' }} \
+            --extra-vars {{ bar_vars_file }} \
+            --inventory {{ tripleo_inventory_file }} 2>&1 | tee {{ backup_nfs_path }}/undercloud_backup_{{ report_timestamp.stdout }}.log
+        executable: /bin/bash
+      async: 10800
+      poll: 30
+      register: undercloud_backup
+      changed_when: true
+
+    # ------------------------------------------------------------------ post-check
+    - name: Check that new backup files exist on the NFS path
+      ansible.builtin.command:
+        argv:
+          - find
+          - "{{ backup_nfs_path }}"
+          - -type
+          - f
+          - -newer
+          - "{{ backup_marker }}"
+          - "!"
+          - -name
+          - "undercloud_backup_*.log"
+          - -printf
+          - "%TY-%Tm-%Td %TH:%TM  %s bytes  %p\\n"
+      register: backup_files
+      changed_when: false
+      failed_when: backup_files.rc != 0 or backup_files.stdout_lines | length == 0
+
+    - name: Show new backup files
+      ansible.builtin.debug:
+        msg: "{{ backup_files.stdout_lines }}"
+
+    - name: Remove start marker
+      ansible.builtin.file:
+        path: "{{ backup_marker }}"
+        state: absent
+      changed_when: false
+
+    # ------------------------------------------------------------------ summary
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "Report timestamp : {{ report_timestamp.stdout }}"
+          - "Backup server    : {{ tripleo_backup_and_restore_server }}"
+          - "Backup path      : {{ backup_nfs_path }}"
+          - "Bar-vars file    : {{ bar_vars_file }}"
+          - "Duration         : {{ undercloud_backup.delta | default('n/a') }}"
+          - "New backup files : {{ backup_files.stdout_lines | length }}"
+          - "Result           : SUCCESS"

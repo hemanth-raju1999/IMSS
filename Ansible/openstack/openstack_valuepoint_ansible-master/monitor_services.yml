@@ -1,0 +1,20 @@
+---
+- name: Monitor Systemd Services
+  hosts: openstack
+  become: true
+  gather_facts: false
+  vars_files:
+    - monitor_vars.yml
+
+  tasks:
+    - name: Gather service facts
+      service_facts:
+
+    - name: Display service status
+      debug:
+        msg: >
+          {{ item }} :
+          {{ ansible_facts.services[item + '.service'].state
+             if (item + '.service') in ansible_facts.services
+             else 'Not Installed' }}
+      loop: "{{ systemd_services }}"

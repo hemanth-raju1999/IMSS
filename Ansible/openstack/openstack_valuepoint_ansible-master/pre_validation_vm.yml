@@ -1,0 +1,166 @@
+---
+- name: RHOSP Pre Validation - Validate User Input Against OpenStack
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # These come in from the AAP survey (user-entered)
+    vm_name: "{{ vm_name }}"
+    image: "{{ image }}"
+    expected_flavor: "{{ flavor }}"
+    expected_network: "{{ network }}"
+    expected_az: "{{ az }}"
+
+  tasks:
+    ###########################################################################
+    # 1. Ensure VM name doesn't already exist
+    ###########################################################################
+    - name: Check if VM name already exists
+      openstack.cloud.server_info:
+        server: "{{ vm_name }}"
+      register: existing_vm
+
+    - name: Ensure VM name is available
+      assert:
+        that:
+          - existing_vm.servers | length == 0
+        fail_msg: "Pre-validation FAILED — VM name '{{ vm_name }}' already exists"
+        success_msg: "VM name '{{ vm_name }}' is available"
+
+
+    ###########################################################################
+    # 2. Validate user-entered image exists and is active
+    ###########################################################################
+    - name: Get requested image info
+      openstack.cloud.image_info:
+        image: "{{ image }}"
+      register: image_check
+
+    - name: Ensure entered image exists and is active
+      assert:
+        that:
+          - image_check.images | length > 0
+          - image_check.images[0].status == 'active'
+        fail_msg: "Pre-validation FAILED — image '{{ image }}' entered by user is invalid or not active"
+        success_msg: "Image '{{ image }}' is valid and active"
+
+
+    ###########################################################################
+    # 3. Validate user-entered flavor exists in OpenStack
+    ###########################################################################
+    - name: Get all flavors from OpenStack
+      openstack.cloud.compute_flavor_info:
+      register: flavors
+
+    - name: Ensure entered flavor is valid
+      assert:
+        that:
+          - expected_flavor in (flavors.flavors | map(attribute='name') | list)
+        fail_msg: "Pre-validation FAILED — flavor '{{ expected_flavor }}' entered by user does not exist. Valid flavors: {{ flavors.flavors | map(attribute='name') | list | join(', ') }}"
+        success_msg: "Flavor '{{ expected_flavor }}' is valid"
+
+    ###########################################################################
+    # 4. Validate user-entered network exists and is active
+    ###########################################################################
+    - name: Get all networks from OpenStack
+      openstack.cloud.networks_info:
+      register: networks
+
+    - name: Ensure entered network is valid and active
+      assert:
+        that:
+          - expected_network in (networks.networks | map(attribute='name') | list)
+          - (networks.networks | selectattr('name', 'equalto', expected_network) | map(attribute='status') | first) == 'ACTIVE'
+        fail_msg: "Pre-validation FAILED — network '{{ expected_network }}' entered by user is invalid or not active. Valid networks: {{ networks.networks | selectattr('status', 'equalto', 'ACTIVE') | map(attribute='name') | list | join(', ') }}"
+        success_msg: "Network '{{ expected_network }}' is valid and active"
+
+    ###########################################################################
+    # 5. Validate user-entered AZ exists and is available
+    ###########################################################################
+    - name: Get all availability zones from OpenStack
+      openstack.cloud.resources:
+        service: compute
+        type: availability_zone
+      register: az_list
+
+    - name: Ensure entered AZ is valid and available
+      assert:
+        that:
+          - expected_az in (az_list.resources | map(attribute='name') | list)
+          - (az_list.resources | selectattr('name', 'equalto', expected_az) | map(attribute='state.available') | first)
+        fail_msg: "Pre-validation FAILED — AZ '{{ expected_az }}' entered by user is invalid or not available. Valid AZs: {{ az_list.resources | selectattr('state.available', 'equalto', true) | map(attribute='name') | list | join(', ') }}"
+        success_msg: "AZ '{{ expected_az }}' is valid and available"
+
+    ###########################################################################
+    # 6. Validate the requested static IP belongs to the chosen network's subnet
+    ###########################################################################
+    - name: Get subnet(s) for the requested network
+      openstack.cloud.subnets_info:
+      register: subnet_check_data
+
+    - name: Filter to the subnet(s) belonging to the requested network
+      set_fact:
+        matching_subnets: >-
+          {{
+            subnet_check_data.subnets
+            | selectattr('network_id', 'equalto',
+                (networks.networks | selectattr('name', 'equalto', expected_network) | map(attribute='id') | first))
+            | list
+          }}
+
+    - name: Ensure at least one subnet exists on the requested network
+      assert:
+        that:
+          - matching_subnets | length > 0
+        fail_msg: "Pre-validation FAILED — no subnet found on network '{{ expected_network }}'"
+        success_msg: "Found {{ matching_subnets | length }} subnet(s) on network '{{ expected_network }}'"
+
+    - name: Check the requested static IP against each subnet's CIDR
+      set_fact:
+        static_ip_valid_for_network: "{{ static_ip_valid_for_network | default(false) or (static_ip is ansible.utils.in_network(item.cidr)) }}"
+      loop: "{{ matching_subnets }}"
+      loop_control:
+        label: "{{ item.cidr }}"
+
+    - name: Ensure requested static IP is valid for the chosen network's subnet
+      assert:
+        that:
+          - static_ip_valid_for_network
+        fail_msg: >-
+          Pre-validation FAILED — static IP '{{ static_ip }}' does not belong to any subnet on network '{{ expected_network }}'.
+          Valid subnet CIDR(s) for this network: {{ matching_subnets | map(attribute='cidr') | join(', ') }}
+        success_msg: "Static IP '{{ static_ip }}' is valid for network '{{ expected_network }}'"
+
+    ###########################################################################
+    # 7. Ensure the requested static IP is not already in use
+    ###########################################################################
+    - name: Get all ports (to check for IP conflicts)
+      openstack.cloud.port_info:
+      register: all_ports_check
+
+    - name: Check if requested static IP is already assigned
+      set_fact:
+        static_ip_already_used: >-
+          {{
+            all_ports_check.ports
+            | map(attribute='fixed_ips')
+            | flatten
+            | selectattr('ip_address', 'equalto', static_ip)
+            | list
+            | length > 0
+          }}
+
+    - name: Ensure requested static IP is not already in use
+      assert:
+        that:
+          - not static_ip_already_used
+        fail_msg: "Pre-validation FAILED — static IP '{{ static_ip }}' is already assigned to another port/VM"
+        success_msg: "Static IP '{{ static_ip }}' is available"
+
+    ###########################################################################
+    # 8. Pre-validation summary
+    ###########################################################################
+    - name: Pre-validation summary
+      debug:
+        msg: "Pre-validation PASSED — user input is valid. Ready to create VM '{{ vm_name }}' with flavor={{ expected_flavor }}, network={{ expected_network }}, az={{ expected_az }}, static_ip={{ static_ip }}"
+

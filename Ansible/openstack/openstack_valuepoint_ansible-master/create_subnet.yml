@@ -1,0 +1,37 @@
+---
+- name: Manage OpenStack Subnet
+  hosts: localhost
+  connection: local
+  gather_facts: false
+ 
+  tasks:
+    - name: Create/Delete subnet
+      openstack.cloud.subnet:
+        auth: "{{ os_auth }}"
+        state: present
+        network_name: "{{ network }}"
+        name: "{{ subnet }}"
+        cidr: "{{ cidr }}"
+        gateway_ip: "{{ gateway_ip }}"
+        enable_dhcp: true
+        dns_nameservers:
+          - 172.16.1.20
+      register: subnet_result
+
+    - name: Display subnet result (formatted)
+      debug:
+        msg:
+          - "=========================================================="
+          - "               SUBNET CREATION REPORT"
+          - "=========================================================="
+          - "Name          : {{ subnet_result.subnet.name }}"
+          - "ID            : {{ subnet_result.subnet.id | default('n/a') }}"
+          - "Network       : {{ network }} (id={{ subnet_result.subnet.network_id | default('n/a') }})"
+          - "CIDR          : {{ subnet_result.subnet.cidr | default(cidr) }}"
+          - "Gateway IP    : {{ subnet_result.subnet.gateway_ip | default(gateway_ip) }}"
+          - "DHCP Enabled  : {{ subnet_result.subnet.enable_dhcp | default('n/a') }}"
+          - "DNS Servers   : {{ subnet_result.subnet.dns_nameservers | default([]) | join(', ') }}"
+          - "IP Version    : {{ subnet_result.subnet.ip_version | default('n/a') }}"
+          - "Result        : {{ 'SUCCESS' if subnet_result.changed or subnet_result.subnet is defined else 'NO CHANGE / CHECK MANUALLY' }}"
+          - "=========================================================="
+      

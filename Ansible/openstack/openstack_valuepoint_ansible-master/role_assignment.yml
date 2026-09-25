@@ -1,0 +1,40 @@
+---
+- name: Manage OpenStack Role Assignment
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - openstack_auth_vars.yml
+  vars:
+    # From AAP survey (raw values, may be empty strings if left blank)
+    role_user: "{{ role_user }}"
+    role_name: "{{ role_name }}"
+    role_project: "{{ role_project | default('') }}"
+    role_domain: "{{ role_domain | default('') }}"
+    role_state: "{{ role_state | default('present') }}"    # present = assign, absent = revoke
+
+  tasks:
+    - name: Assign/Revoke Role
+      openstack.cloud.role_assignment:
+       # auth: "{{ os_auth }}"
+        auth_type: password
+        interface: public
+        state: "{{ role_state }}"
+        user: "{{ role_user }}"                                 
+        role: "{{ role_name }}"
+        project: "{{ role_project if (role_project | length > 0) else omit }}"
+        domain: "{{ role_domain if (role_domain | length > 0) else omit }}"
+      register: role_result
+
+    - name: Display role assignment result (formatted)
+      debug:
+        msg:
+          - "=========================================================="
+          - "        ROLE {{ 'ASSIGNMENT' if role_state == 'present' else 'REVOCATION' }} REPORT"
+          - "=========================================================="
+          - "User    : {{ role_user }}"
+          - "Role    : {{ role_name }}"
+          - "Project : {{ role_project if role_project | length > 0 else 'n/a' }}"
+          - "Domain  : {{ role_domain if role_domain | length > 0 else 'n/a' }}"
+          - "Result  : {{ 'SUCCESS - role assigned' if (role_result.changed and role_state == 'present') else 'SUCCESS - role revoked' if (role_result.changed and role_state == 'absent') else 'NO CHANGE - assignment already exists/did not exist' }}"
+          - "=========================================================="

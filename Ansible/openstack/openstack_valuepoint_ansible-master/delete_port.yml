@@ -1,0 +1,27 @@
+---
+- name: OpenStack Resource Cleanup
+  hosts: localhost
+  gather_facts: false
+  vars:
+    port: "{{ port }}"
+  tasks:
+    ###################################################################
+    # Delete Port
+    ###################################################################
+
+    - name: Delete Port
+      openstack.cloud.port:
+        state: absent
+        name: "{{ port }}"
+      register: port_delete_result
+
+    - name: Display port deletion result (formatted)
+      debug:
+        msg:
+          - "=========================================================="
+          - "               PORT DELETION REPORT"
+          - "=========================================================="
+          - "Port Name     : {{ port }}"
+          - "Changed       : {{ port_delete_result.changed | default('n/a') }}"
+          - "Result        : {{ 'DELETED SUCCESSFULLY' if port_delete_result.changed else 'NOT FOUND / ALREADY ABSENT' }}"
+          - "=========================================================="

@@ -1,0 +1,187 @@
+---
+- name: RHOSP 17.1 database backup (undercloud and overcloud)
+  hosts: director
+  gather_facts: false
+
+  vars:
+    backup_dir: /nfs-tst
+    backup_type: both                                           # undercloud | overcloud | both (AAP survey: multiple choice)
+    backup_undercloud: "{{ backup_type in ['undercloud', 'both'] }}"
+    backup_overcloud: "{{ backup_type in ['overcloud', 'both'] }}"
+    overcloud_ssh_user: tripleo-admin
+    ssh_opts: "-o StrictHostKeyChecking=no -o BatchMode=yes"
+
+  tasks:
+    # ------------------------------------------------------------------ #
+    # Pre-flight
+    # ------------------------------------------------------------------ #
+    - name: Get report timestamp
+      ansible.builtin.command:
+        cmd: date +%Y%m%d_%H%M%S
+      register: report_timestamp
+      changed_when: false
+      delegate_to: localhost
+
+    - name: Set backup file paths
+      ansible.builtin.set_fact:
+        undercloud_backup_file: "{{ backup_dir }}/undercloud-all-databases-{{ report_timestamp.stdout }}.sql"
+        overcloud_backup_file: "{{ backup_dir }}/overcloud-db-backup-{{ report_timestamp.stdout }}.sql"
+
+    - name: Check that the NFS backup path is mounted on the director
+      ansible.builtin.command: "mountpoint -q {{ backup_dir }}"
+      register: nfs_check
+      changed_when: false
+      failed_when: false
+
+    - name: Set backup path readiness
+      ansible.builtin.set_fact:
+        backup_path_ready: "{{ nfs_check.rc == 0 }}"
+
+    - name: NFS path not mounted - backups will be skipped
+      ansible.builtin.debug:
+        msg: >-
+          {{ backup_dir }} is not a mount point on {{ inventory_hostname }}.
+          Backups are skipped to avoid filling the local filesystem. Mount the NFS share and re-run.
+      when: not backup_path_ready
+
+    - name: Invalid backup_type - nothing will be backed up
+      ansible.builtin.debug:
+        msg: "backup_type '{{ backup_type }}' is not valid. Use one of: undercloud, overcloud, both."
+      when: backup_type not in ['undercloud', 'overcloud', 'both']
+
+    - name: Controller not provided - overcloud backup will be skipped
+      ansible.builtin.debug:
+        msg: >-
+          Variable 'controller' is not set, so the overcloud backup is skipped.
+          Re-run with -e controller=<controller-hostname-or-ip>.
+      when:
+        - backup_overcloud | bool
+        - controller is not defined or (controller | length) == 0
+
+    # ------------------------------------------------------------------ #
+    # Undercloud DB backup
+    # ------------------------------------------------------------------ #
+    - name: Undercloud database backup
+      when:
+        - backup_undercloud | bool
+        - backup_path_ready | bool
+      block:
+        - name: Dump all undercloud databases from the mysql container
+          ansible.builtin.shell: |
+            umask 077
+            sudo podman exec -u root mysql bash -c "mysqldump -uroot --opt --all-databases" > {{ undercloud_backup_file }}
+          args:
+            executable: /bin/bash
+          changed_when: true
+
+        - name: Verify undercloud dump completed successfully
+          ansible.builtin.shell: |
+            tail -n 1 {{ undercloud_backup_file }} | grep -q 'Dump completed'
+          args:
+            executable: /bin/bash
+          changed_when: false
+
+        - name: Record undercloud backup result
+          ansible.builtin.set_fact:
+            undercloud_backup_status: SUCCESS
+
+        - name: Undercloud backup completed
+          ansible.builtin.debug:
+            msg: "Undercloud DB backup saved to {{ undercloud_backup_file }}"
+
+      rescue:
+        - name: Remove partial undercloud dump
+          ansible.builtin.file:
+            path: "{{ undercloud_backup_file }}"
+            state: absent
+
+        - name: Record undercloud backup result
+          ansible.builtin.set_fact:
+            undercloud_backup_status: FAILED
+
+        - name: Undercloud backup failed
+          ansible.builtin.debug:
+            msg:
+              - "Undercloud DB backup FAILED on {{ inventory_hostname }} (failed task: {{ ansible_failed_task.name }})"
+              - "Details: {{ ansible_failed_result.stderr | default(ansible_failed_result.msg | default('no error output')) }}"
+              - "Partial dump file was removed."
+
+    # ------------------------------------------------------------------ #
+    # Overcloud DB backup (via SSH to a controller)
+    # ------------------------------------------------------------------ #
+    - name: Overcloud database backup
+      when:
+        - backup_overcloud | bool
+        - backup_path_ready | bool
+        - controller is defined
+        - (controller | length) > 0
+      block:
+        - name: Check SSH access and locate the galera-bundle container on the controller
+          ansible.builtin.shell: >-
+            ssh {{ ssh_opts }} {{ overcloud_ssh_user }}@{{ controller }}
+            'sudo podman ps -q -f name=galera-bundle'
+          args:
+            executable: /bin/bash
+          register: galera_ps
+          changed_when: false
+          failed_when: galera_ps.rc != 0 or (galera_ps.stdout_lines | length) != 1
+
+        - name: Dump all overcloud databases from the Galera container
+          ansible.builtin.shell: |
+            umask 077
+            ssh {{ ssh_opts }} {{ overcloud_ssh_user }}@{{ controller }} \
+              'sudo podman exec $(sudo podman ps -q -f name=galera-bundle) mysqldump --all-databases --single-transaction --extended-insert=FALSE' \
+              > {{ overcloud_backup_file }}
+          args:
+            executable: /bin/bash
+          changed_when: true
+
+        - name: Verify overcloud dump completed successfully
+          ansible.builtin.shell: |
+            tail -n 1 {{ overcloud_backup_file }} | grep -q 'Dump completed'
+          args:
+            executable: /bin/bash
+          changed_when: false
+
+        - name: Record overcloud backup result
+          ansible.builtin.set_fact:
+            overcloud_backup_status: SUCCESS
+
+        - name: Overcloud backup completed
+          ansible.builtin.debug:
+            msg: "Overcloud DB backup (via {{ controller }}) saved to {{ overcloud_backup_file }}"
+
+      rescue:
+        - name: Remove partial overcloud dump
+          ansible.builtin.file:
+            path: "{{ overcloud_backup_file }}"
+            state: absent
+
+        - name: Record overcloud backup result
+          ansible.builtin.set_fact:
+            overcloud_backup_status: FAILED
+
+        - name: Overcloud backup failed
+          ansible.builtin.debug:
+            msg:
+              - "Overcloud DB backup via {{ controller }} FAILED (failed task: {{ ansible_failed_task.name }})"
+              - "Details: {{ ansible_failed_result.stderr | default(ansible_failed_result.msg | default('no error output')) }}"
+              - "Partial dump file was removed."
+
+    # ------------------------------------------------------------------ #
+    # Summary
+    # ------------------------------------------------------------------ #
+    - name: Collect this run's backup files
+      ansible.builtin.find:
+        paths: "{{ backup_dir }}"
+        patterns: "*{{ report_timestamp.stdout }}.sql"
+      register: new_backups
+      when: backup_path_ready | bool
+
+    - name: Backup summary
+      ansible.builtin.debug:
+        msg:
+          - "Undercloud backup : {{ undercloud_backup_status | default('SKIPPED') }}"
+          - "Overcloud backup  : {{ overcloud_backup_status | default('SKIPPED') }}"
+          - "Backup location   : {{ backup_dir }}"
+          - "Files this run    : {{ (new_backups.files | default([])) | map(attribute='path') | list }}"

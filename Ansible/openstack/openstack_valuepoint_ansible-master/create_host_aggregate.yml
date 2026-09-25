@@ -1,0 +1,49 @@
+---
+- name: Create OpenStack Host Aggregate
+  hosts: localhost
+  gather_facts: false
+  vars:
+    aggregate_name: "{{ aggregate_name }}"
+    compute_hosts: "{{ compute_hosts | default('') }}"
+
+  tasks:
+    - name: Validate required survey inputs
+      ansible.builtin.assert:
+        that:
+          - aggregate_name is defined and aggregate_name | trim != ""
+        fail_msg: "Required survey field 'aggregate_name' is missing or empty."
+        success_msg: "Required survey inputs are present."
+
+    - name: Build host list from survey input
+      ansible.builtin.set_fact:
+        compute_host_list: "{{ compute_hosts.split(',') | map('trim') | reject('equalto', '') | list }}"
+      when: compute_hosts | trim != ""
+
+    - name: Create a Nova host aggregate (no hosts)
+      openstack.cloud.host_aggregate:
+        state: present
+        name: "{{ aggregate_name }}"
+      register: aggregate_info
+      when: compute_host_list is not defined
+
+    - name: Create a Nova host aggregate and add hosts
+      openstack.cloud.host_aggregate:
+        state: present
+        name: "{{ aggregate_name }}"
+        hosts: "{{ compute_host_list }}"
+      register: aggregate_info
+      when: compute_host_list is defined
+
+    - name: Display host aggregate information
+      ansible.builtin.debug:
+        var: aggregate_info
+
+    - name: Display success message
+      ansible.builtin.debug:
+        msg: >-
+          {% if compute_host_list is defined %}
+          Host Aggregate '{{ aggregate_name }}' created successfully with hosts: {{ compute_host_list | join(', ') }}.
+          {% else %}
+          Host Aggregate '{{ aggregate_name }}' created successfully with no hosts added.
+          {% endif %}
+

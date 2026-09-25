@@ -1,0 +1,15 @@
+---
+# Controller node containers
+controller_podman_containers:
+  - nova_api
+  - nova_scheduler
+  - nova_conductor
+  - neutron_api
+  - glance_api
+
+
+# Compute node containers
+compute_podman_containers:
+  - nova_compute
+  - neutron_ovs_agent
+  - nova_libvirt

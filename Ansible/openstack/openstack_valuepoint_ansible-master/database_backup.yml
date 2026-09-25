@@ -1,0 +1,21 @@
+---
+- name: Database Backup Management
+  hosts: director
+  gather_facts: false
+  vars_files:
+    - openstack_auth_vars.yml 
+  tasks:
+    - name: OverCloud Backup
+      ansible.builtin.command:
+        cmd: >-
+          ssh -o StrictHostKeyChecking=no -o BatchMode=yes
+          tripleo-admin@{{ controller }}
+          "podman exec $(sudo podman ps -q -f name=galera-bundle) mysqldump --all-databases --single-transaction --extended-insert=FALSE > overcloud-db-backup-$(date +%F_%H%M%S).sql"
+      register: overcloud_output
+      when: cloud == "{{ backup_type }}"
+
+    - name: UnderCloud Backup
+      ansible.builtin.command:
+        cmd: podman exec -u root mysql bash -c "mysqldump -uroot --opt --all-databases" > ~/undercloud-all-databases.sql
+      register: undercloud_output
+      when: cloud == "{{ backup_type }}"

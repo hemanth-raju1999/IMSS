@@ -1,0 +1,81 @@
+---
+- name: Manage OpenStack User
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - openstack_auth_vars.yml
+  vars:
+    # From AAP survey
+    user_name: "{{ user_name }}"
+    user_password_input: "{{ user_password_input | default('') }}"
+    user_email: "{{ user_email | default('') }}"
+    user_domain: "{{ user_domain | default('Default') }}"
+    user_default_project: "{{ user_default_project | default(omit) }}"
+    user_enabled: "{{ user_enabled | default(true) }}"
+    user_state: "{{ user_state | default('present') }}"   # present = create, absent = delete
+
+  tasks:
+    - name: Check if user already exists (for accurate reporting)
+      openstack.cloud.identity_user_info:
+        name: "{{ user_name }}"
+      register: existing_user_check
+      when: user_state == 'present'
+
+    - name: Set fact - did user exist before this run?
+      set_fact:
+        user_pre_existed: "{{ (existing_user_check.users | default([]) | length) > 0 }}"
+      when: user_state == 'present'
+
+    - name: Create User (only if it doesn't already exist)
+      openstack.cloud.identity_user:
+        auth_type: password
+        interface: public
+        state: "{{ user_state }}"
+        name: "{{ user_name }}"
+        password: "{{ user_password_input }}"
+        email: "{{ user_email }}"
+        domain: "{{ user_domain }}"
+        default_project: "{{ user_default_project }}"
+        is_enabled: "{{ user_enabled }}"         #if your collection version rejects 'is_enabled', change to 'enabled' instead
+      register: user_result
+      #no_log: true 
+      when: user_state == 'absent' or not user_pre_existed
+
+    - name: Display user result - already existed, skipped
+      debug:
+        msg:
+          - "=========================================================="
+          - "                USER CREATION SKIPPED"
+          - "=========================================================="
+          - "User Name : {{ user_name }}"
+          - "Result    : SKIPPED - user already exists, no changes made (create-only mode)"
+          - "=========================================================="
+      when: user_state == 'present' and user_pre_existed
+
+    - name: Display user result - newly created (no password shown)
+      debug:
+        msg:
+          - "=========================================================="
+          - "                USER CREATION REPORT"
+          - "=========================================================="
+          - "Name            : {{ user_result.user.name | default(user_name) }}"
+          - "ID              : {{ user_result.user.id | default('n/a') }}"
+          - "Email           : {{ user_result.user.email | default('n/a') }}"
+          - "Domain          : {{ user_result.user.domain_id | default(user_domain) }}"
+          - "Default Project : {{ user_result.user.default_project_id | default(user_default_project | default('none')) }}"
+          - "Enabled         : {{ user_result.user.is_enabled | default('n/a') }}"
+          - "Result          : SUCCESS - user newly created"
+          - "=========================================================="
+      when: user_state == 'present' and not user_pre_existed
+
+    - name: Display user deletion result (formatted)
+      debug:
+        msg:
+          - "=========================================================="
+          - "                USER DELETION REPORT"
+          - "=========================================================="
+          - "User Name : {{ user_name }}"
+          - "Result    : {{ 'SUCCESS - user deleted' if user_result.changed else 'NO CHANGE - user may not have existed' }}"
+          - "=========================================================="
+      when: user_state == 'absent'

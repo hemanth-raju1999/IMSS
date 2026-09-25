@@ -1,0 +1,30 @@
+---
+- name: OpenStack Resource Cleanup
+  hosts: localhost
+  gather_facts: false
+  vars:
+    network: "{{ network }}"
+  tasks:
+    ###################################################################
+    # Delete Network
+    ###################################################################
+
+    - name: Delete Network
+      openstack.cloud.network:
+        state: absent
+        name: "{{ network }}"
+      register: network_delete_result
+      ignore_errors: true
+
+    - name: Display network deletion result (formatted)
+      debug:
+        msg:
+          - "=========================================================="
+          - "               NETWORK DELETION REPORT"
+          - "=========================================================="
+          - "Network Name  : {{ network }}"
+          - "Changed       : {{ network_delete_result.changed | default('n/a') }}"
+          - "Failed        : {{ network_delete_result.failed | default(false) }}"
+          - "Error (if any): {{ network_delete_result.msg | default('none') }}"
+          - "Result        : {{ 'DELETED SUCCESSFULLY' if network_delete_result.changed and not (network_delete_result.failed | default(false)) else ('FAILED - CHECK DEPENDENCIES' if network_delete_result.failed | default(false) else 'NOT FOUND / ALREADY ABSENT') }}"
+          - "=========================================================="

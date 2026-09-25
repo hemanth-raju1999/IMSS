@@ -1,0 +1,16 @@
+---
+- name: Manage OpenStack Router
+  hosts: localhost
+  gather_facts: false
+  vars:
+    router: "{{ router }}"
+  tasks:
+    - name: Create Router
+      openstack.cloud.router:
+        state: present
+        name: "{{ router }}"
+      register: router_result
+
+    - name: Display result
+      debug:
+        var: router_result

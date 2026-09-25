@@ -1,0 +1,158 @@
+---
+- name: Rebuild OpenStack VM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    # From AAP survey
+    vm_name: "{{ vm_name }}"
+    rebuild_image: "{{ rebuild_image }}"          
+    disk_config: "{{ disk_config | default('AUTOMATIC') }}" 
+    power_on_after_rebuild: "{{ power_on_after_rebuild | default(false) }}" # force VM to ACTIVE after rebuild, regardless of prior state
+
+  tasks:
+    ###########################################################################
+    # 1. Confirm VM exists and capture its current state
+    ###########################################################################
+    - name: Get current VM info
+      openstack.cloud.server_info:
+        server: "{{ vm_name }}"
+      register: pre_rebuild_info
+
+    - name: Ensure VM exists
+      assert:
+        that:
+          - pre_rebuild_info.servers | length > 0
+        fail_msg: "VM '{{ vm_name }}' not found — cannot rebuild"
+        success_msg: "VM '{{ vm_name }}' found — proceeding with rebuild"
+
+    - name: Capture pre-rebuild facts
+      set_fact:
+        pre_rebuild_status: "{{ pre_rebuild_info.servers[0].status }}"
+        pre_rebuild_image_id: "{{ pre_rebuild_info.servers[0].image.id | default('n/a') }}"
+
+    - name: Look up pre-rebuild image name from its ID
+      openstack.cloud.image_info:
+        image: "{{ pre_rebuild_image_id }}"
+      register: pre_image_info
+      when: pre_rebuild_image_id != 'n/a'
+
+    - name: Set pre-rebuild image display name
+      set_fact:
+        pre_rebuild_image: >-
+          {{
+            (pre_image_info.images[0].name ~ ' (' ~ pre_rebuild_image_id ~ ')')
+            if (pre_image_info is defined and pre_image_info.images | default([]) | length > 0)
+            else pre_rebuild_image_id
+          }}
+
+    - name: Ensure VM is not already in a transitional/error state
+      assert:
+        that:
+          - pre_rebuild_status in ['ACTIVE', 'SHUTOFF']
+        fail_msg: "VM '{{ vm_name }}' is in state '{{ pre_rebuild_status }}' — must be ACTIVE or SHUTOFF to rebuild safely"
+        success_msg: "VM '{{ vm_name }}' is in a safe state ('{{ pre_rebuild_status }}') to rebuild"
+
+    ###########################################################################
+    # 2. Confirm requested rebuild image exists and is active
+    ###########################################################################
+    - name: Get requested rebuild image info
+      openstack.cloud.image_info:
+        image: "{{ rebuild_image }}"
+      register: image_check
+
+    - name: Ensure rebuild image exists and is active
+      assert:
+        that:
+          - image_check.images | length > 0
+          - image_check.images[0].status == 'active'
+        fail_msg: "Rebuild image '{{ rebuild_image }}' is invalid or not active"
+        success_msg: "Rebuild image '{{ rebuild_image }}' is valid and active"
+
+    ###########################################################################
+    # 3. Rebuild the VM
+    ###########################################################################
+    - name: Rebuild VM with requested image
+      openstack.cloud.server_action:
+        server: "{{ vm_name }}"
+        action: rebuild
+        image: "{{ rebuild_image }}"
+        wait: true
+        timeout: 600
+      register: rebuild_result
+
+    
+    - name: Set MANUAL disk partitioning via OpenStack CLI (optional)
+      ansible.builtin.command:
+        cmd: "openstack server rebuild {{ vm_name }} --image {{ rebuild_image }} --disk-config manual"
+      when: disk_config | upper == 'MANUAL'
+      changed_when: true
+
+    ###########################################################################
+    # 4. Confirm VM returns to its ORIGINAL power state after rebuild
+    ###########################################################################
+    - name: Poll VM status until it returns to its pre-rebuild state
+      openstack.cloud.server_info:
+        server: "{{ vm_name }}"
+      register: post_rebuild_info
+      until:
+        - post_rebuild_info.servers[0].status == pre_rebuild_status
+        - post_rebuild_info.servers[0].status != 'ERROR'
+      retries: 24
+      delay: 10
+
+    - name: Fail fast if VM landed in ERROR state
+      fail:
+        msg: "VM '{{ vm_name }}' entered ERROR state during rebuild"
+      when: post_rebuild_info.servers[0].status == 'ERROR'
+
+    ###########################################################################
+    # 5. Optionally power on the VM after rebuild
+    ###########################################################################
+    - name: Start VM after rebuild (if requested)
+      openstack.cloud.server_action:
+        server: "{{ vm_name }}"
+        action: start
+        wait: true
+        timeout: 300
+      when:
+        - power_on_after_rebuild | bool
+        - post_rebuild_info.servers[0].status == 'SHUTOFF'
+      register: start_result
+
+    - name: Re-fetch VM info after optional start
+      openstack.cloud.server_info:
+        server: "{{ vm_name }}"
+      register: final_info
+      when: power_on_after_rebuild | bool
+
+    - name: Set final status fact
+      set_fact:
+        final_status: "{{ final_info.servers[0].status if power_on_after_rebuild | bool else post_rebuild_info.servers[0].status }}"
+
+    ###########################################################################
+    # 6. Report result
+    ###########################################################################
+    - name: Display rebuild result
+      debug:
+        msg:
+          - "=========================================================="
+          - "                  VM REBUILD REPORT"
+          - "=========================================================="
+          - "VM Name         : {{ vm_name }}"
+          - "Previous Status : {{ pre_rebuild_status }}"
+          - "Previous Image  : {{ pre_rebuild_image }}"
+          - "New Image       : {{ image_check.images[0].name }} ({{ image_check.images[0].id }})"
+          - "Disk Partition  : {{ disk_config | upper }}"
+          - "Powered On After Rebuild : {{ 'Yes' if power_on_after_rebuild | bool else 'No (kept original state)' }}"
+          - "Final Status    : {{ final_status }}"
+          - "Result          : {{ 'SUCCESS - VM rebuilt' if final_status in ['ACTIVE', pre_rebuild_status] else 'FAILED - check manually' }}"
+          - "=========================================================="
+
+    - name: Fail the play if rebuild did not reach expected final state
+      fail:
+        msg: "VM rebuild FAILED for '{{ vm_name }}' — final status: {{ final_status }}"
+      when: >
+        (power_on_after_rebuild | bool and final_status != 'ACTIVE') or
+        (not power_on_after_rebuild | bool and final_status != pre_rebuild_status)
+

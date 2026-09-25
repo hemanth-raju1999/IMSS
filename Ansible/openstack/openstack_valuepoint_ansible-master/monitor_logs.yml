@@ -1,0 +1,40 @@
+---
+- name: Enable Debug Logging for RHOSP Service
+  hosts: openstack
+  become: true
+  vars:
+    debug_option: true
+    service_name: nova_api
+
+  tasks:
+    - name: Check if Podman is installed
+      command: podman ps
+      register: podman_check
+      ignore_errors: yes
+      changed_when: false
+    
+    - name: Set deployment type
+      set_fact:
+        service_type: "{{ 'container' if podman_check.rc == 0 else 'systemd' }}"
+        
+    - name: config file for systemd
+      set_fact:
+        config_file: "/etc/nova/nova.conf"
+      when: service_type == 'systemd'
+      
+    - name: config file for container
+      set_fact:
+        config_file: "/var/lib/config-data/puppet-generated/nova/etc/nova/nova.conf"
+      when: service_type == 'container'
+    
+    - name: Check configuration file exists
+      stat:
+        path: "{{ config_file }}"
+      register: config_status
+
+    - name: Fail if configuration file not found
+      fail:
+        msg: "Configuration file does not exist."
+      when: not config_status.stat.exists
+
+        

@@ -1,0 +1,22 @@
+---
+- name: Evacuate instances from a failed compute host
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - openstack_auth_vars.yml
+  vars:
+    failed_host: "{{ failed_host }}"
+    target_host: "{{ target_host }}"
+    cloud_name: "{{ cloud_name }}"
+  tasks:
+    - name: Re-verify service is still down immediately before evacuating
+      ansible.builtin.command:
+        cmd: openstack --os-cloud {{ cloud_name }} compute service list -f json
+      register: svc_recheck
+      changed_when: false
+      environment: "{{ auth_env }}"
+
+    - name: Abort if host came back up
+      ansible.builtin.fail:
+        msg: "{{ failed_host }} is back up — aborting evacuation, use migration instead."
+      when: "'down' not in (svc_recheck.stdout | from_json | selectattr('Host', 'equalto', failed_host) | map(attribute='State') | list | join(','))"

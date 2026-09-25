@@ -1,0 +1,179 @@
+---
+- name: OpenStack VM Cold Migration
+  hosts: localhost
+  gather_facts: false
+  vars:
+    cloud_name: "{{ cloud_name }}"
+    vm_name: "{{ vm_name }}"
+    destination_host: "{{ destination_host }}"
+#   vars_files:
+#     - <vars_files_name>
+  tasks:
+    - name: Get VM details before migration
+      ansible.builtin.command:
+      cmd: >
+      openstack --os-cloud {{ cloud_name }}
+      server show {{ vm_name }} -f json
+      register: vm_before
+      changed_when: false
+      environment: "{{ auth_env }}"
+   
+    - name: Extract VM information
+      ansible.builtin.set_fact:
+      source_host: "{{ (vm_before.stdout | from_json)['OS-EXT-SRV-ATTR:host'] }}"
+      vm_status: "{{ (vm_before.stdout | from_json)['status'] }}"
+  
+    - name: Display VM information
+      ansible.builtin.debug:
+      msg:
+      - "VM Name       : {{ vm_name }}"
+      - "VM Status     : {{ vm_status }}"
+      - "Source Host   : {{ source_host }}"
+      - "Destination   : {{ destination_host }}"
+  
+    - name: Validate VM is ACTIVE
+      ansible.builtin.assert:
+      that:
+      - vm_status == "ACTIVE"
+      fail_msg: >
+      VM {{ vm_name }} is not ACTIVE.
+      Current status: {{ vm_status }}
+  
+    - name: Validate source and destination are different
+      ansible.builtin.assert:
+      that:
+      - source_host != destination_host
+      fail_msg: >
+      Source host {{ source_host }} and destination host
+      {{ destination_host }} are the same.
+  
+    - name: Stop VM before cold migration
+      ansible.builtin.command:
+      cmd: >
+      openstack --os-cloud {{ cloud_name }}
+      server stop {{ vm_name }}
+      register: stop_result
+      environment: "{{ auth_env }}"
+  
+    - name: Wait for VM to become SHUTOFF
+      ansible.builtin.command:
+      cmd: >
+      openstack --os-cloud {{ cloud_name }}
+      server show {{ vm_name }}
+      -f value -c status
+      register: shutdown_status
+      until: shutdown_status.stdout | trim == "SHUTOFF"
+      retries: 30
+      delay: 5
+      changed_when: false
+      environment: "{{ auth_env }}"
+  
+    - name: Display VM shutdown status
+      ansible.builtin.debug:
+      msg: "VM {{ vm_name }} is now SHUTOFF."
+  
+    - name: Perform cold migration
+      ansible.builtin.command:
+      cmd: >
+      openstack --os-cloud {{ cloud_name }}
+      server migrate
+      --host {{ destination_host }}
+      {{ vm_name }}
+      register: migration_result
+      environment: "{{ auth_env }}"
+  
+    - name: Display migration result
+      ansible.builtin.debug:
+      var: migration_result.stdout
+  
+    - name: Confirm migration
+      ansible.builtin.command:
+      cmd: >
+      openstack --os-cloud {{ cloud_name }}
+      server show {{ vm_name }} -f json
+      register: vm_after_migration
+      changed_when: false
+      environment: "{{ auth_env }}"
+  
+    - name: Extract migrated host
+      ansible.builtin.set_fact:
+      migrated_host: >-
+      {{ (vm_after_migration.stdout | from_json)
+      ['OS-EXT-SRV-ATTR:host'] }}
+  
+    - name: Display migrated host
+      ansible.builtin.debug:
+      msg:
+      - "Source Host      : {{ source_host }}"
+      - "Destination Host : {{ migrated_host }}"
+  
+    - name: Validate migration destination
+      ansible.builtin.assert:
+      that:
+      - migrated_host == destination_host
+      fail_msg: >
+      Cold migration failed.
+      Expected host: {{ destination_host }}
+      Actual host: {{ migrated_host }}
+      success_msg: >
+      Cold migration completed successfully.
+      VM is now on {{ destination_host }}.
+  
+    - name: Start VM after migration
+      ansible.builtin.command:
+      cmd: >
+      openstack --os-cloud {{ cloud_name }}
+      server start {{ vm_name }}
+      environment: "{{ auth_env }}"
+  
+    - name: Wait for VM to become ACTIVE
+      ansible.builtin.command:
+      cmd: >
+      openstack --os-cloud {{ cloud_name }}
+      server show {{ vm_name }}
+      -f value -c status
+      register: final_status
+      until: final_status.stdout | trim == "ACTIVE"
+      retries: 30
+      delay: 10
+      changed_when: false
+      environment: "{{ auth_env }}"
+  
+    - name: Final migration validation
+      ansible.builtin.command:
+      cmd: >
+      openstack --os-cloud {{ cloud_name }}
+      server show {{ vm_name }} -f json
+      register: final_vm_info
+      changed_when: false
+      environment: "{{ auth_env }}"
+  
+    - name: Extract final VM host
+      ansible.builtin.set_fact:
+      final_host: >-
+      {{ (final_vm_info.stdout | from_json)
+      ['OS-EXT-SRV-ATTR:host'] }}
+  
+    - name: Display final result
+      ansible.builtin.debug:
+      msg:
+      - "=========================================="
+      - "       COLD MIGRATION RESULT"
+      - "=========================================="
+      - "VM Name       : {{ vm_name }}"
+      - "Source Host   : {{ source_host }}"
+      - "Destination   : {{ final_host }}"
+      - "Final Status  : {{ final_status.stdout | trim }}"
+      - "=========================================="
+  
+    - name: Validate final state
+      ansible.builtin.assert:
+      that:
+      - final_host == destination_host
+      - final_status.stdout | trim == "ACTIVE"
+      fail_msg: >
+      Final cold migration validation failed.
+      success_msg: >
+      VM {{ vm_name }} successfully cold migrated from
+      {{ source_host }} to {{ final_host }} and is ACTIVE.
+  
