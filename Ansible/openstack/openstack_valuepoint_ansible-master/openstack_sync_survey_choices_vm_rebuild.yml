@@ -1,0 +1,126 @@
+---
+- name: Sync AAP Survey Choices with Live OpenStack Data (Rebuild VM template)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/aap_vars.yml
+  vars:
+
+    # AAP Controller connection details
+    aap_host: "https://gateway1.imss.com"
+    aap_validate_certs: false
+
+    aap_api_base: "/api/controller/v2"
+
+    template_type: "job_templates"
+    template_id: 42  
+
+    survey_field_map:
+      vm_name: vm_names
+      rebuild_image: images
+
+  tasks:
+    ###########################################################################
+    # 1. Pull live data from OpenStack
+    ###########################################################################
+    - name: Get all VM instances
+      openstack.cloud.server_info:
+      register: server_data
+
+    - name: Get active images
+      openstack.cloud.image_info:
+      register: image_data
+
+    - name: Build choice lists
+      set_fact:
+        vm_names: "{{ server_data.servers | map(attribute='name') | list | sort }}"
+        images: "{{ image_data.images | selectattr('status', 'equalto', 'active') | map(attribute='name') | list | sort }}"
+
+    - name: Ensure at least one VM and one image were found
+      assert:
+        that:
+          - vm_names | length > 0
+          - images | length > 0
+        fail_msg: "No VMs or no active images found — refusing to push an empty choice list to the survey"
+        success_msg: "Found {{ vm_names | length }} VM(s) and {{ images | length }} active image(s)"
+
+    - name: Display fetched choice lists
+      debug:
+        msg:
+          - "VM Names  : {{ vm_names | join(', ') }}"
+          - "Images    : {{ images | join(', ') }}"
+
+    ###########################################################################
+    # 2. Fetch current survey_spec from AAP Controller
+    ###########################################################################
+    - name: Get current survey spec
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ template_type }}/{{ template_id }}/survey_spec/"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        status_code: 200
+      register: current_survey
+
+    ###########################################################################
+    # 3. Update the "choices" field for each mapped survey question
+    ###########################################################################
+    - name: Build a lookup dict of live choice lists keyed by survey variable_name
+      set_fact:
+        live_choices_by_var:
+          vm_name: "{{ vm_names }}"
+          rebuild_image: "{{ images }}"
+
+    - name: Initialize the updated question list
+      set_fact:
+        updated_spec_list: []
+
+    - name: Rebuild each survey question, refreshing choices where mapped
+      set_fact:
+        updated_spec_list: >-
+          {{
+            updated_spec_list
+            + [
+                item
+                | combine(
+                    {'choices': live_choices_by_var[item.variable]}
+                    if item.variable in live_choices_by_var
+                    else {}
+                  )
+              ]
+          }}
+      loop: "{{ current_survey.json.spec }}"
+      loop_control:
+        label: "{{ item.variable }}"
+
+    - name: Assemble final survey spec payload
+      set_fact:
+        updated_survey_spec: "{{ current_survey.json | combine({'spec': updated_spec_list}) }}"
+
+    - name: Display updated survey spec (for review before push)
+      debug:
+        var: updated_survey_spec
+
+    ###########################################################################
+    # 4. Push updated survey_spec back to AAP Controller
+    ###########################################################################
+    - name: Push updated survey spec to AAP
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ template_type }}/{{ template_id }}/survey_spec/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        body_format: json
+        body: "{{ updated_survey_spec }}"
+        status_code: [200, 201]
+      register: push_result
+
+    - name: Confirm sync result
+      debug:
+        msg: "Survey spec for template ID {{ template_id }} updated successfully with live OpenStack VM names and images."
+      when: push_result.status in [200, 201]

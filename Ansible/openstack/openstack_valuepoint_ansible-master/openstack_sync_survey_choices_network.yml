@@ -1,0 +1,111 @@
+---
+- name: Sync AAP Network Workflow Survey Choices with Live OpenStack Data
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: 
+    - vars/auth_vars.yml
+  vars:
+    # AAP Controller connection details
+    aap_host: "https://gateway1.imss.com"        
+    aap_username: "shama"
+    aap_password: "shama@123"           
+    aap_validate_certs: false
+    aap_api_base: "/api/controller/v2"
+
+    template_type: "workflow_job_templates"
+    template_id: 30                              
+
+    survey_field_map:
+      security_group: security_groups
+
+  tasks:
+    ###########################################################################
+    # 1. Pull live security group data from OpenStack
+    ###########################################################################
+    - name: Get security groups
+      openstack.cloud.security_group_info:
+        auth: "{{ os_auth }}"
+        project_id: 9b5b84dbf29a4863b47ddd8161b58ce0                       # Comment this if you want to list sg for all projects
+      register: sg_data
+
+    - name: Build choice list
+      set_fact:
+        security_groups: "{{ sg_data.security_groups | map(attribute='name') | list | sort }}"
+
+    - name: Display fetched choice list
+      debug:
+        msg: "Security Groups : {{ security_groups | join(', ') }}"
+
+    ###########################################################################
+    # 2. Fetch current survey_spec from AAP Controller
+    ###########################################################################
+    - name: Get current survey spec
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ template_type }}/{{ template_id }}/survey_spec/"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        status_code: 200
+      register: current_survey
+
+    ###########################################################################
+    # 3. Update the "choices" field for the mapped survey question only
+    ###########################################################################
+    - name: Build a lookup dict of live choice lists keyed by survey variable
+      set_fact:
+        live_choices_by_var:
+          security_group: "{{ security_groups }}"
+
+    - name: Initialize the updated question list
+      set_fact:
+        updated_spec_list: []
+
+    - name: Rebuild each survey question, refreshing choices where mapped
+      set_fact:
+        updated_spec_list: >-
+          {{
+            updated_spec_list
+            + [
+                item
+                | combine(
+                    {'choices': live_choices_by_var[item.variable]}
+                    if item.variable in live_choices_by_var
+                    else {}
+                  )
+              ]
+          }}
+      loop: "{{ current_survey.json.spec }}"
+      loop_control:
+        label: "{{ item.variable }}"
+
+    - name: Assemble final survey spec payload
+      set_fact:
+        updated_survey_spec: "{{ current_survey.json | combine({'spec': updated_spec_list}) }}"
+
+    - name: Display updated survey spec (for review before push)
+      debug:
+        var: updated_survey_spec
+
+    ###########################################################################
+    # 4. Push updated survey_spec back to AAP Controller
+    ###########################################################################
+    - name: Push updated survey spec to AAP
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ template_type }}/{{ template_id }}/survey_spec/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        body_format: json
+        body: "{{ updated_survey_spec }}"
+        status_code: [200, 201]
+      register: push_result
+
+    - name: Confirm sync result
+      debug:
+        msg: "Survey spec for template ID {{ template_id }} updated successfully with live security group choices."
+      when: push_result.status in [200, 201]

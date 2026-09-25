@@ -1,0 +1,281 @@
+---
+- name: Sync AAP Survey Choices with Live OpenStack Data (Create VM + Delete Image + Resize VM templates)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/aap_vars.yml
+  vars:
+
+    # AAP Controller connection details
+    aap_host: "https://gateway1.imss.com"
+    aap_validate_certs: false
+
+    aap_api_base: "/api/controller/v2"
+
+    template_type: "workflow_job_templates"
+    template_id: 39 #16
+
+    delete_image_template_type: "job_templates"
+    delete_image_template_id: 55
+
+    resize_vm_template_type: "job_templates"
+    resize_vm_template_id: 48
+
+    rebuild_vm_template_type: "job_templates"
+    rebuild_vm_template_id: 42   
+
+    # Images that must never appear as a delete choice (base/golden images others depend on)
+    protected_images:
+      - "cirros-0.6.3-x86_64-disk"
+
+  tasks:
+    ###########################################################################
+    # 1. Pull live data from OpenStack (once, reused across all templates)
+    ###########################################################################
+    - name: Get active images
+      openstack.cloud.image_info:
+      register: image_data
+
+    - name: Get flavors
+      openstack.cloud.compute_flavor_info:
+      register: flavor_data
+
+    - name: Get active networks
+      openstack.cloud.networks_info:
+      register: network_data
+
+    - name: Get available availability zones
+      openstack.cloud.resources:
+        service: compute
+        type: availability_zone
+      register: az_data
+
+    - name: Get all VM instances
+      openstack.cloud.server_info:
+      register: server_data
+
+    - name: Build choice lists
+      set_fact:
+        images: "{{ image_data.images | selectattr('status', 'equalto', 'active') | map(attribute='name') | list | sort }}"
+        flavors: "{{ flavor_data.flavors | map(attribute='name') | list | sort }}"
+        networks: "{{ network_data.networks | selectattr('status', 'equalto', 'ACTIVE') | map(attribute='name') | list | sort }}"
+        availability_zones: "{{ az_data.resources | selectattr('state.available', 'equalto', true) | map(attribute='name') | list | sort }}"
+        # Only VMs in a resizable state — ACTIVE or SHUTOFF.
+        # Excludes transitional/bad states (BUILD, ERROR, MIGRATING,
+        # RESIZE, VERIFY_RESIZE, etc.) where a resize would fail or
+        # conflict with an in-progress operation.
+        vm_names: "{{ server_data.servers | selectattr('status', 'in', ['ACTIVE', 'SHUTOFF']) | map(attribute='name') | list | sort }}"
+
+    - name: Display fetched choice lists
+      debug:
+        msg:
+          - "Images    : {{ images | join(', ') }}"
+          - "Flavors   : {{ flavors | join(', ') }}"
+          - "Networks  : {{ networks | join(', ') }}"
+          - "AZs       : {{ availability_zones | join(', ') }}"
+          - "VM Names (ACTIVE/SHUTOFF) : {{ vm_names | join(', ') }}"
+
+    ###########################################################################
+    # Reusable sync logic (repeated per template as a block, since sync
+    # touches a different template_type/template_id/live_choices each time)
+    ###########################################################################
+
+    ###########################################################################
+    # 2A. Sync CREATE VM template survey
+    ###########################################################################
+    - name: "[CREATE] Build lookup dict of live choice lists keyed by survey variable_name"
+      set_fact:
+        create_live_choices_by_var:
+          image: "{{ images }}"
+          flavor: "{{ flavors }}"
+          network: "{{ networks }}"
+          az: "{{ availability_zones }}"
+
+    - name: "[CREATE] Get current survey spec"
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ template_type }}/{{ template_id }}/survey_spec/"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        status_code: 200
+      register: create_current_survey
+
+    - name: "[CREATE] Rebuild each survey question, refreshing choices where mapped"
+      set_fact:
+        create_updated_spec_list: "{{ create_updated_spec_list | default([]) + [item | combine({'choices': create_live_choices_by_var[item.variable]} if item.variable in create_live_choices_by_var else {})] }}"
+      loop: "{{ create_current_survey.json.spec }}"
+      loop_control:
+        label: "{{ item.variable }}"
+
+    - name: "[CREATE] Assemble final survey spec payload"
+      set_fact:
+        create_updated_survey_spec: "{{ create_current_survey.json | combine({'spec': create_updated_spec_list}) }}"
+
+    - name: "[CREATE] Push updated survey spec to AAP"
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ template_type }}/{{ template_id }}/survey_spec/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        body_format: json
+        body: "{{ create_updated_survey_spec }}"
+        status_code: [200, 201]
+      register: create_push_result
+
+    - name: "[CREATE] Confirm sync result"
+      debug:
+        msg: "Survey spec for CREATE VM template ID {{ template_id }} updated successfully."
+      when: create_push_result.status in [200, 201]
+
+    ###########################################################################
+    # 2B. Sync DELETE IMAGE template survey
+    ###########################################################################
+    - name: "[DELETE IMAGE] Build lookup dict of live choice lists keyed by survey variable_name"
+      set_fact:
+        delete_image_live_choices_by_var:
+          image_name: "{{ images | difference(protected_images) }}"
+
+    - name: "[DELETE IMAGE] Get current survey spec"
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ delete_image_template_type }}/{{ delete_image_template_id }}/survey_spec/"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        status_code: 200
+      register: delete_image_current_survey
+
+    - name: "[DELETE IMAGE] Rebuild each survey question, refreshing choices where mapped"
+      set_fact:
+        delete_image_updated_spec_list: "{{ delete_image_updated_spec_list | default([]) + [item | combine({'choices': delete_image_live_choices_by_var[item.variable]} if item.variable in delete_image_live_choices_by_var else {})] }}"
+      loop: "{{ delete_image_current_survey.json.spec }}"
+      loop_control:
+        label: "{{ item.variable }}"
+
+    - name: "[DELETE IMAGE] Assemble final survey spec payload"
+      set_fact:
+        delete_image_updated_survey_spec: "{{ delete_image_current_survey.json | combine({'spec': delete_image_updated_spec_list}) }}"
+
+    - name: "[DELETE IMAGE] Push updated survey spec to AAP"
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ delete_image_template_type }}/{{ delete_image_template_id }}/survey_spec/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        body_format: json
+        body: "{{ delete_image_updated_survey_spec }}"
+        status_code: [200, 201]
+      register: delete_image_push_result
+
+    - name: "[DELETE IMAGE] Confirm sync result"
+      debug:
+        msg: "Survey spec for DELETE IMAGE template ID {{ delete_image_template_id }} updated successfully."
+      when: delete_image_push_result.status in [200, 201]
+
+    ###########################################################################
+    # 2C. Sync RESIZE VM template survey
+    #     Maps: vm_name -> live VM name list, new_flavor -> live flavor list
+    ###########################################################################
+    - name: "[RESIZE VM] Build lookup dict of live choice lists keyed by survey variable_name"
+      set_fact:
+        resize_vm_live_choices_by_var:
+          vm_name: "{{ vm_names }}"
+          new_flavor: "{{ flavors }}"
+
+    - name: "[RESIZE VM] Get current survey spec"
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ resize_vm_template_type }}/{{ resize_vm_template_id }}/survey_spec/"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        status_code: 200
+      register: resize_vm_current_survey
+
+    - name: "[RESIZE VM] Rebuild each survey question, refreshing choices where mapped"
+      set_fact:
+        resize_vm_updated_spec_list: "{{ resize_vm_updated_spec_list | default([]) + [item | combine({'choices': resize_vm_live_choices_by_var[item.variable]} if item.variable in resize_vm_live_choices_by_var else {})] }}"
+      loop: "{{ resize_vm_current_survey.json.spec }}"
+      loop_control:
+        label: "{{ item.variable }}"
+
+    - name: "[RESIZE VM] Assemble final survey spec payload"
+      set_fact:
+        resize_vm_updated_survey_spec: "{{ resize_vm_current_survey.json | combine({'spec': resize_vm_updated_spec_list}) }}"
+
+    - name: "[RESIZE VM] Push updated survey spec to AAP"
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ resize_vm_template_type }}/{{ resize_vm_template_id }}/survey_spec/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        body_format: json
+        body: "{{ resize_vm_updated_survey_spec }}"
+        status_code: [200, 201]
+      register: resize_vm_push_result
+
+    - name: "[RESIZE VM] Confirm sync result"
+      debug:
+        msg: "Survey spec for RESIZE VM template ID {{ resize_vm_template_id }} updated successfully."
+      when: resize_vm_push_result.status in [200, 201]
+
+    ###########################################################################
+    # 2D. Sync REBUILD VM template survey
+    #     Maps: vm_name -> live VM name list, rebuild_image -> live active image list
+    ###########################################################################
+    - name: "[REBUILD VM] Build lookup dict of live choice lists keyed by survey variable_name"
+      set_fact:
+        rebuild_vm_live_choices_by_var:
+          vm_name: "{{ vm_names }}"
+          rebuild_image: "{{ images }}"
+
+    - name: "[REBUILD VM] Get current survey spec"
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ rebuild_vm_template_type }}/{{ rebuild_vm_template_id }}/survey_spec/"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        status_code: 200
+      register: rebuild_vm_current_survey
+
+    - name: "[REBUILD VM] Rebuild each survey question, refreshing choices where mapped"
+      set_fact:
+        rebuild_vm_updated_spec_list: "{{ rebuild_vm_updated_spec_list | default([]) + [item | combine({'choices': rebuild_vm_live_choices_by_var[item.variable]} if item.variable in rebuild_vm_live_choices_by_var else {})] }}"
+      loop: "{{ rebuild_vm_current_survey.json.spec }}"
+      loop_control:
+        label: "{{ item.variable }}"
+
+    - name: "[REBUILD VM] Assemble final survey spec payload"
+      set_fact:
+        rebuild_vm_updated_survey_spec: "{{ rebuild_vm_current_survey.json | combine({'spec': rebuild_vm_updated_spec_list}) }}"
+
+    - name: "[REBUILD VM] Push updated survey spec to AAP"
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ rebuild_vm_template_type }}/{{ rebuild_vm_template_id }}/survey_spec/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        body_format: json
+        body: "{{ rebuild_vm_updated_survey_spec }}"
+        status_code: [200, 201]
+      register: rebuild_vm_push_result
+
+    - name: "[REBUILD VM] Confirm sync result"
+      debug:
+        msg: "Survey spec for REBUILD VM template ID {{ rebuild_vm_template_id }} updated successfully."
+      when: rebuild_vm_push_result.status in [200, 201]

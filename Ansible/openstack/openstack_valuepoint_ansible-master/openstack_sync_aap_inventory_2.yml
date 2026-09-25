@@ -1,0 +1,122 @@
+---
+- name: Sync Discovered Nodes into AAP Inventory (Default EE)
+  hosts: localhost
+  gather_facts: false
+  collections:
+    - ansible.controller
+  vars_files:
+    - vars/aap_creds.yml
+  vars:
+    target_inventory_name: "ttsl_openstack_overcloud"
+    target_organization: "Default"                       # change here
+    target_group_name: "openstack_overcloud"
+    target_controller_group_name: "openstack_overcloud_controllers"
+    target_compute_group_name: "openstack_overcloud_computes"
+    director_host: "172.16.3.79"                        # change here
+
+  tasks:
+    - name: Build target_hosts list (simple, name == ip)
+      ansible.builtin.set_fact:
+        target_hosts: "{{ target_hosts | default([]) + [{'name': item, 'ip': item}] }}"
+      loop: "{{ (compute_nodes + controller_nodes) | unique }}"
+      loop_control:
+        label: "{{ item }}"
+
+    # ========================================================
+    # Static Inventory Creation
+    # ========================================================
+
+    - name: Ensure the inventory exists
+      ansible.controller.inventory:
+        name: "{{ target_inventory_name }}"
+        organization: "{{ target_organization }}"
+        state: present
+        controller_host: "{{ aap_host }}"
+        controller_username: "{{ aap_username }}"
+        controller_password: "{{ aap_password }}"
+        validate_certs: false
+
+    - name: Create the parent group within the inventory
+      ansible.controller.group:
+        name: "{{ target_group_name }}"
+        inventory: "{{ target_inventory_name }}"
+        state: present
+        variables:
+          ansible_user: heat-admin
+          ansible_become: true
+          ansible_ssh_common_args: >-
+            -o StrictHostKeyChecking=no
+            -o ProxyCommand="ssh -o StrictHostKeyChecking=no -W %h:%p -q stack@{{ director_host }}"
+        controller_host: "{{ aap_host }}"
+        controller_username: "{{ aap_username }}"
+        controller_password: "{{ aap_password }}"
+        validate_certs: false
+
+    - name: Create the controller-role group within the inventory
+      ansible.controller.group:
+        name: "{{ target_controller_group_name }}"
+        inventory: "{{ target_inventory_name }}"
+        state: present
+        controller_host: "{{ aap_host }}"
+        controller_username: "{{ aap_username }}"
+        controller_password: "{{ aap_password }}"
+        validate_certs: false
+
+    - name: Create the compute-role group within the inventory
+      ansible.controller.group:
+        name: "{{ target_compute_group_name }}"
+        inventory: "{{ target_inventory_name }}"
+        state: present
+        controller_host: "{{ aap_host }}"
+        controller_username: "{{ aap_username }}"
+        controller_password: "{{ aap_password }}"
+        validate_certs: false
+
+    - name: Add hosts to the inventory
+      ansible.controller.host:
+        name: "{{ item.name }}"
+        inventory: "{{ target_inventory_name }}"
+        state: present
+        variables:
+          ansible_host: "{{ item.ip }}"
+        controller_host: "{{ aap_host }}"
+        controller_username: "{{ aap_username }}"
+        controller_password: "{{ aap_password }}"
+        validate_certs: false
+      loop: "{{ target_hosts }}"
+
+    - name: Associate all hosts with the parent group
+      ansible.controller.group:
+        name: "{{ target_group_name }}"
+        inventory: "{{ target_inventory_name }}"
+        state: present
+        hosts: "{{ target_hosts | map(attribute='name') | list }}"
+        preserve_existing_hosts: true
+        controller_host: "{{ aap_host }}"
+        controller_username: "{{ aap_username }}"
+        controller_password: "{{ aap_password }}"
+        validate_certs: false
+
+    - name: Associate controller nodes with the controller-role group
+      ansible.controller.group:
+        name: "{{ target_controller_group_name }}"
+        inventory: "{{ target_inventory_name }}"
+        state: present
+        hosts: "{{ controller_nodes | unique }}"
+        preserve_existing_hosts: true
+        controller_host: "{{ aap_host }}"
+        controller_username: "{{ aap_username }}"
+        controller_password: "{{ aap_password }}"
+        validate_certs: false
+
+    - name: Associate compute nodes with the compute-role group
+      ansible.controller.group:
+        name: "{{ target_compute_group_name }}"
+        inventory: "{{ target_inventory_name }}"
+        state: present
+        hosts: "{{ compute_nodes | unique }}"
+        preserve_existing_hosts: true
+        controller_host: "{{ aap_host }}"
+        controller_username: "{{ aap_username }}"
+        controller_password: "{{ aap_password }}"
+        validate_certs: false

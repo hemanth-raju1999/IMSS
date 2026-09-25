@@ -1,0 +1,250 @@
+---
+- name: Sync AAP Survey Choices with Live OpenStack Data (Attach + Detach + Resize + Delete Volume templates)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/aap_vars.yml
+  vars:
+
+    # AAP Controller connection details
+    aap_host: "https://gateway1.imss.com"
+    aap_validate_certs: false
+
+    aap_api_base: "/api/controller/v2"
+
+    template_type: "job_templates"
+
+    attach_template_id: 44
+    detach_template_id: 46
+    resize_template_id: 47   
+    delete_template_id: 49   
+
+  tasks:
+    ###########################################################################
+    # 1. Pull live data from OpenStack (once, reused for all three templates)
+    ###########################################################################
+    - name: Get all VM instances
+      openstack.cloud.server_info:
+        # auth: "{{ os_auth }}"
+      register: server_data
+
+    - name: Get all volumes
+      openstack.cloud.volume_info:
+      register: volume_data
+
+    - name: Build choice lists
+      set_fact:
+        vm_names: "{{ server_data.servers | map(attribute='name') | list | sort }}"
+        available_volumes: "{{ volume_data.volumes | selectattr('status', 'equalto', 'available') | map(attribute='name') | list | sort }}"
+        in_use_volumes: "{{ volume_data.volumes | selectattr('status', 'equalto', 'in-use') | map(attribute='name') | list | sort }}"
+        all_volumes: "{{ volume_data.volumes | map(attribute='name') | list | sort }}"
+
+    - name: Ensure at least one VM was found
+      assert:
+        that:
+          - vm_names | length > 0
+        fail_msg: "No VMs found — refusing to push an empty choice list to the surveys"
+        success_msg: "Found {{ vm_names | length }} VM(s)"
+
+    - name: Warn if no available volumes found (attach/resize surveys will be empty)
+      debug:
+        msg: "WARNING: No 'available' volumes found — ATTACH and RESIZE surveys' volume_name choices will be empty"
+      when: available_volumes | length == 0
+
+    - name: Warn if no in-use volumes found (detach survey will be empty)
+      debug:
+        msg: "WARNING: No 'in-use' volumes found — DETACH survey's volume_name choices will be empty"
+      when: in_use_volumes | length == 0
+
+    - name: Display fetched choice lists
+      debug:
+        msg:
+          - "VM Names            : {{ vm_names | join(', ') }}"
+          - "Available Volumes   : {{ available_volumes | join(', ') }}"
+          - "In-Use Volumes      : {{ in_use_volumes | join(', ') }}"
+
+    - name: Build lookup dicts of live choice lists keyed by survey variable_name (one per template)
+      set_fact:
+        attach_live_choices_by_var:
+          vm_name: "{{ vm_names }}"
+          volume_name: "{{ available_volumes }}"
+        detach_live_choices_by_var:
+          vm_name: "{{ vm_names }}"
+          volume_name: "{{ in_use_volumes }}"
+        resize_live_choices_by_var:
+          volume_name: "{{ available_volumes }}"  
+        delete_live_choices_by_var:
+          volume_name: "{{ all_volumes }}"   
+
+    ###########################################################################
+    # 2A. Sync ATTACH template survey
+    ###########################################################################
+    - name: "[ATTACH] Get current survey spec"
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ template_type }}/{{ attach_template_id }}/survey_spec/"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        status_code: 200
+      register: attach_current_survey
+
+    - name: "[ATTACH] Rebuild each survey question, refreshing choices where mapped"
+      set_fact:
+        attach_updated_spec_list: "{{ attach_updated_spec_list | default([]) + [item | combine({'choices': attach_live_choices_by_var[item.variable]} if item.variable in attach_live_choices_by_var else {})] }}"
+      loop: "{{ attach_current_survey.json.spec }}"
+      loop_control:
+        label: "{{ item.variable }}"
+
+    - name: "[ATTACH] Assemble final survey spec payload"
+      set_fact:
+        attach_updated_survey_spec: "{{ attach_current_survey.json | combine({'spec': attach_updated_spec_list}) }}"
+
+    - name: "[ATTACH] Push updated survey spec to AAP"
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ template_type }}/{{ attach_template_id }}/survey_spec/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        body_format: json
+        body: "{{ attach_updated_survey_spec }}"
+        status_code: [200, 201]
+      register: attach_push_result
+
+    - name: "[ATTACH] Confirm sync result"
+      debug:
+        msg: "Survey spec for ATTACH template ID {{ attach_template_id }} updated successfully."
+      when: attach_push_result.status in [200, 201]
+
+    ###########################################################################
+    # 2B. Sync DETACH template survey
+    ###########################################################################
+    - name: "[DETACH] Get current survey spec"
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ template_type }}/{{ detach_template_id }}/survey_spec/"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        status_code: 200
+      register: detach_current_survey
+
+    - name: "[DETACH] Rebuild each survey question, refreshing choices where mapped"
+      set_fact:
+        detach_updated_spec_list: "{{ detach_updated_spec_list | default([]) + [item | combine({'choices': detach_live_choices_by_var[item.variable]} if item.variable in detach_live_choices_by_var else {})] }}"
+      loop: "{{ detach_current_survey.json.spec }}"
+      loop_control:
+        label: "{{ item.variable }}"
+
+    - name: "[DETACH] Assemble final survey spec payload"
+      set_fact:
+        detach_updated_survey_spec: "{{ detach_current_survey.json | combine({'spec': detach_updated_spec_list}) }}"
+
+    - name: "[DETACH] Push updated survey spec to AAP"
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ template_type }}/{{ detach_template_id }}/survey_spec/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        body_format: json
+        body: "{{ detach_updated_survey_spec }}"
+        status_code: [200, 201]
+      register: detach_push_result
+
+    - name: "[DETACH] Confirm sync result"
+      debug:
+        msg: "Survey spec for DETACH template ID {{ detach_template_id }} updated successfully."
+      when: detach_push_result.status in [200, 201]
+
+    ###########################################################################
+    # 2C. Sync RESIZE template survey
+    ###########################################################################
+    - name: "[RESIZE] Get current survey spec"
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ template_type }}/{{ resize_template_id }}/survey_spec/"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        status_code: 200
+      register: resize_current_survey
+
+    - name: "[RESIZE] Rebuild each survey question, refreshing choices where mapped"
+      set_fact:
+        resize_updated_spec_list: "{{ resize_updated_spec_list | default([]) + [item | combine({'choices': resize_live_choices_by_var[item.variable]} if item.variable in resize_live_choices_by_var else {})] }}"
+      loop: "{{ resize_current_survey.json.spec }}"
+      loop_control:
+        label: "{{ item.variable }}"
+
+    - name: "[RESIZE] Assemble final survey spec payload"
+      set_fact:
+        resize_updated_survey_spec: "{{ resize_current_survey.json | combine({'spec': resize_updated_spec_list}) }}"
+
+    - name: "[RESIZE] Push updated survey spec to AAP"
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ template_type }}/{{ resize_template_id }}/survey_spec/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        body_format: json
+        body: "{{ resize_updated_survey_spec }}"
+        status_code: [200, 201]
+      register: resize_push_result
+
+    - name: "[RESIZE] Confirm sync result"
+      debug:
+        msg: "Survey spec for RESIZE template ID {{ resize_template_id }} updated successfully."
+      when: resize_push_result.status in [200, 201]
+
+    ###########################################################################
+    # 2D. Sync DELETE template survey
+    ###########################################################################
+    - name: "[DELETE] Get current survey spec"
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ template_type }}/{{ delete_template_id }}/survey_spec/"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        status_code: 200
+      register: delete_current_survey
+
+    - name: "[DELETE] Rebuild each survey question, refreshing choices where mapped"
+      set_fact:
+        delete_updated_spec_list: "{{ delete_updated_spec_list | default([]) + [item | combine({'choices': delete_live_choices_by_var[item.variable]} if item.variable in delete_live_choices_by_var else {})] }}"
+      loop: "{{ delete_current_survey.json.spec }}"
+      loop_control:
+        label: "{{ item.variable }}"
+
+    - name: "[DELETE] Assemble final survey spec payload"
+      set_fact:
+        delete_updated_survey_spec: "{{ delete_current_survey.json | combine({'spec': delete_updated_spec_list}) }}"
+
+    - name: "[DELETE] Push updated survey spec to AAP"
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ template_type }}/{{ delete_template_id }}/survey_spec/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        body_format: json
+        body: "{{ delete_updated_survey_spec }}"
+        status_code: [200, 201]
+      register: delete_push_result
+
+    - name: "[DELETE] Confirm sync result"
+      debug:
+        msg: "Survey spec for DELETE template ID {{ delete_template_id }} updated successfully."
+      when: delete_push_result.status in [200, 201]

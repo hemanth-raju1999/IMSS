@@ -1,0 +1,117 @@
+---
+- name: Sync AAP Survey Role Choices with Live OpenStack Data
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars/auth_vars.yml
+  vars:
+    # AAP Controller connection details
+    aap_host: "https://gateway1.imss.com"       
+    aap_username: "shama"
+    aap_password: "shama@123"           
+    aap_validate_certs: false
+    aap_api_base: "/api/controller/v2"
+
+    template_type: "job_templates"
+    template_id: 35                        
+
+    survey_field_map:
+      role_name: live_role_names
+
+  tasks:
+    ###########################################################################
+    # 1. Pull live role list from OpenStack
+    ###########################################################################
+    - name: Get Keystone roles
+      openstack.cloud.identity_role_info:
+        auth: "{{ os_auth }}"
+      register: role_data
+
+    - name: DEBUG - show raw role_data structure
+      debug:
+        var: role_data
+
+    - name: Build choice list (deduplicated, sorted)
+      set_fact:
+        live_role_names: "{{ role_data.roles | map(attribute='name') | unique | list | sort }}"
+
+    - name: Display fetched choice list
+      debug:
+        msg: "Roles : {{ live_role_names | join(', ') }}"
+
+    ###########################################################################
+    # 2. Fetch current survey_spec from AAP Controller
+    ###########################################################################
+    - name: Get current survey spec
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ template_type }}/{{ template_id }}/survey_spec/"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        status_code: 200
+      register: current_survey
+
+    ###########################################################################
+    # 3. Update the "choices" field for the mapped survey question only
+    ###########################################################################
+    - name: Build a lookup dict of live choice lists keyed by survey variable
+      set_fact:
+        live_choices_by_var:
+          role_name: "{{ live_role_names }}"
+
+    - name: Initialize the updated question list
+      set_fact:
+        updated_spec_list: []
+
+    - name: Rebuild each survey question, refreshing choices where mapped
+      set_fact:
+        updated_spec_list: >-
+          {{
+            updated_spec_list
+            + [
+                item
+                | combine(
+                    {
+                      'choices': live_choices_by_var[item.variable],
+                      'default': (item.default if item.default in live_choices_by_var[item.variable] else live_choices_by_var[item.variable][0])
+                    }
+                    if (item.variable in live_choices_by_var and (live_choices_by_var[item.variable] | length) > 0)
+                    else {}
+                  )
+              ]
+          }}
+      loop: "{{ current_survey.json.spec }}"
+      loop_control:
+        label: "{{ item.variable }}"
+
+    - name: Assemble final survey spec payload
+      set_fact:
+        updated_survey_spec: "{{ current_survey.json | combine({'spec': updated_spec_list}) }}"
+
+    - name: Display updated survey spec (for review before push)
+      debug:
+        var: updated_survey_spec
+
+    ###########################################################################
+    # 4. Push updated survey_spec back to AAP Controller
+    ###########################################################################
+    - name: Push updated survey spec to AAP
+      uri:
+        url: "{{ aap_host }}{{ aap_api_base }}/{{ template_type }}/{{ template_id }}/survey_spec/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        body_format: json
+        body: "{{ updated_survey_spec }}"
+        status_code: [200, 201]
+      register: push_result
+
+    - name: Confirm sync result
+      debug:
+        msg: "Survey spec for template ID {{ template_id }} updated successfully with live role choices."
+      when: push_result.status in [200, 201]
