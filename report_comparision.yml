@@ -1,0 +1,3 @@
+---
+- import_playbook: /var/lib/awx/projects/hemanth/infosys/reports_filtration.yml  
+- import_playbook: /var/lib/awx/projects/hemanth/infosys/comp.yml

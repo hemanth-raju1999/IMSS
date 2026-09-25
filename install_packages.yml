@@ -1,0 +1,16 @@
+---
+- name: Mounting
+  hosts: localhost
+  become: true
+  tasks:
+          #- name: download chrome debian package
+          #get_url:
+          #url: https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          #dest: /var/lib/awx/projects/hemanth/packages/
+
+    - name: download chrome RPM package
+      get_url:
+        url: http://archive.ubuntu.com/ubuntu/pool/main/f/firefox/firefox_75.0+build3-0ubuntu1_amd64.deb
+        dest: /var/lib/awx/projects/hemanth/packages/
+      
+

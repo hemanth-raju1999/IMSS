@@ -1,0 +1,11 @@
+---
+- name: coping a file
+  hosts: test
+  become: true
+  vars:
+    ansible_password: int123$%^
+  tasks:
+    - name: Synchronization using rsync protocol
+      synchronize:
+        src: /var/lib/awx/projects/hemanth/infosys/vars.yml
+        dest: /root/Hemanth/infosys/

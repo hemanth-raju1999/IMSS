@@ -1,0 +1,17 @@
+---
+- name: Commenting
+  hosts: test
+  gather_facts: no
+  become: true
+  tasks:
+   
+    - name: extacting ID's
+      shell: cat /root/Hemanth/resigned | awk -F ':' '{print $1}' 
+      register: output
+
+    - name: comment  the line
+      replace:
+        path: /root/Hemanth/edetails
+        regexp: "{{item}}"
+        replace: "#{{item}}"
+      loop: "{{output.stdout_lines}}"

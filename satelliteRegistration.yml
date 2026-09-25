@@ -1,0 +1,34 @@
+---
+- name: Registring the non registered servers
+  hosts: test
+  become: true
+  gather_facts: false
+  tasks:
+
+     - name: updating no_proxy in rhsm.conf
+        replace:
+	  path: /etc/rhsm/rhsm.conf
+	  regexp: "no_proxy ="
+	  replace: "no_proxy = localhost,*.ad.infosys.com"
+
+     - name: adding entry to /etc/hosts
+       blockinfile:
+	 path: /etc/hosts
+	 block:
+		10.67.61.164 	b1zum002.ad.infosys.com 	b12um802
+
+                #- name: downloading bootstrap.py into / tmp
+       #get_url:
+               #url: http://b12um002.ad.infosys.com/pub/bootstrap.py
+         #dest: /tmp/bootstrap.py
+         # mode: 0755
+
+     - name: running the bootstrap-Py
+       shell:
+	 cmd: /tmp/bootstrap.py -s https://satellite-server.imss.com -L "AKAASH" -o "Default_Organization" -g test_servers -a RHEL6_key --force --skip-foreman
+       ignore_errors: yes
+
+      - name: checking subscription status
+        shell:
+          cmd: subscription-manager status
+        register: sub_state

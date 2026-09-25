@@ -1,0 +1,27 @@
+---
+- name: check
+  hosts: test
+  become: true
+  vars_files:
+    - vars.yml
+
+  tasks:
+    - name: Gather the package facts
+      package_facts:
+        manager: auto
+
+    - name: Check whether a package is installed
+      yum:
+        name: /root/Hemanth/rpm_packages/google-chrome-stable_current_x86_64.rpm
+        state: latest
+        # msg: "Package {{ item.packages }} is installed"
+        # when: "'{{ item.packages }}' in ansible_facts.packages"
+      when: "'google-chrome-stable' not in ansible_facts.packages"
+
+    - name: Debugging the package facts
+      debug:
+        msg: "Package {{ item.packages }} is not installed"
+      when: "'{{ item.packages }}' not in ansible_facts.packages"
+        #when: "'google-chrome-stable' not in ansible_facts.packages"
+      loop: "{{ package_names }}"
+

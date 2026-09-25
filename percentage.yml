@@ -1,0 +1,32 @@
+---
+- name: percentage
+  hosts: localhost
+  become: true
+  gather_facts: no
+  tasks:
+
+    - name: word count of before1.csv
+      shell: wc -l before1.csv
+      register: wcb1
+
+    - name: word count different_elements.csv
+      shell: wc -l different_elements.csv
+      register: wca1
+
+    - name: Read list1 from CSV file
+      set_fact:
+              beforelist: "{{ wcb1.stdout_lines }}"
+
+    - name: Read list2 from CSV file
+      set_fact:
+              afterlist: "{{ wca1.stdout_lines }}"
+    - debug:
+        var: "{{ beforelist }}"
+
+    - debug:
+        var: "{{ afterlist }}"
+
+    - name: Calculate Percentage
+      debug:
+        msg: "The percentage is {{ (afterlist / beforelist) * 100 }}%"
+

@@ -1,0 +1,102 @@
+---
+ - name: check packages are installed or not
+   hosts: linux_ubuntu, test_servers, failed_server 
+   gather_facts: no
+   become: yes
+   serial: 1
+   ignore_errors: yes
+   ignore_unreachable: yes
+  
+   tasks:
+
+  ##Checking for unreachable hosts. Sends them to a single csv file
+     - name: Capture unreachable hosts
+       shell: echo "{{ inventory_hostname }}"
+       register: unreachable_host
+
+     - name: Add to list file if unreachable
+       lineinfile:
+         line: "Unreachable Host: {{ inventory_hostname }}"
+         path: /var/lib/awx/projects/hemanth/infosys/error_reports/unreachable.csv
+         create: yes
+         insertafter: EOF
+       delegate_to: localhost
+       when: unreachable_host.unreachable == true
+  
+  ### Checking to see if sudo error occured. Send them to a file saying sudo errors
+     - name: Checking for sudo error 
+       setup:
+       register: output
+
+     - name: Add to list file if sudo error
+       lineinfile:
+         line: "Host: {{ inventory_hostname }} has sudo errors"
+         path: /var/lib/awx/projects/hemanth/infosys/error_reports/sudoProblem.csv
+         create: yes
+         insertafter: EOF
+       delegate_to: localhost
+       when: "'Missing sudo password' in output.msg"
+
+     
+        
+  ###Checking to see if a package is installed will send these to two different files: 
+  #####1) List of hosts with package present & 2) List of hosts with package absent
+
+     - name: Gather the package facts.
+       package_facts:
+         manager: auto
+       register: package_facts_result
+
+     - name: Check whether a package called flexera agent is installed.
+       debug:
+         msg: "Flexera agent is already  installed"
+       when: "'flexera-agent' in ansible_facts.packages"
+
+     - name: Add to list file if present
+       lineinfile:
+         line: "Hostname: {{ ansible_hostname }}, IP Address: {{ ansible_default_ipv4.address }}"    
+         path: /var/lib/awx/projects/hemanth/infosys/error_reports/present.csv
+         create: yes
+       delegate_to: localhost    
+       when: "'flexera-agent' in ansible_facts.packages"
+
+     - name: Add to list file if absent
+       lineinfile:
+         line: "Hostname: {{ ansible_hostname }}, IP Address: {{ ansible_default_ipv4.address }}"    
+         path: /var/lib/awx/projects/hemanth/infosys/error_reports/absent.csv
+         create: yes
+         insertafter: EOF
+       delegate_to: localhost
+       when: "'flexera-agent' not in ansible_facts.packages"
+
+
+
+ ### Checking to see if package successfully installed, tasks would be run after running installation tasks.
+       
+     - name: Search for package after installation
+       shell: rpm -qa | grep 'flexera-agent'
+       register: package_list
+       ignore_errors: yes
+
+     - name: Add to list file if not properly installed
+       lineinfile:
+         line: "Hostname: {{ ansible_hostname }}, IP Address: {{ ansible_default_ipv4.address }}"
+         path: /var/lib/awx/projects/hemanth/infosys/error_reports/unsuccessfulInstallation.csv
+         create: yes
+         insertafter: EOF
+       delegate_to: localhost
+       when: package_list.rc == 1
+
+     - name: Add to list file if properly installed
+       lineinfile:
+         line: "Hostname: {{ ansible_hostname }}, IP Address: {{ ansible_default_ipv4.address }}"
+         path: /var/lib/awx/projects/hemanth/infosys/error_reports/successfulInstallation.csv
+         create: yes
+         insertafter: EOF
+       delegate_to: localhost
+       when: package_list.rc == 0
+
+
+
+
+

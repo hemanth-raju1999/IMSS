@@ -1,0 +1,17 @@
+---
+- name: Commenting
+  hosts: test
+  gather_facts: no
+  become: true
+  tasks:
+   
+    - name: extacting ID's
+      shell: cat /root/Hemanth/resigned  
+      register: output
+
+    - name: delete the line
+      lineinfile:
+        path: /root/Hemanth/edetails
+        line: '#{{ item }}' 
+        state: absent
+      loop: "{{ output.stdout_lines }}"

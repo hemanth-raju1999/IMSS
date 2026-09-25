@@ -1,0 +1,54 @@
+---
+ - name: check packages are installed or not
+   hosts: test_servers
+   gather_facts: yes
+   become: yes
+   serial: 1
+   ignore_errors: yes
+   ignore_unreachable: yes
+  
+   tasks:
+
+     - name: Capture unreachable hosts
+       shell: echo "{{ inventory_hostname }}"
+       register: unreachable_host
+
+     - name: Add to list file if unreachable
+       lineinfile:
+         line: "Unreachable Host: {{ inventory_hostname }}"
+         path: /var/lib/awx/projects/hemanth/infosys/unreachable.csv
+         create: yes
+         insertafter: EOF
+       delegate_to: localhost
+       when: unreachable_host.unreachable == true
+ 
+     - name: Gather the package facts.
+       package_facts:
+         manager: auto
+
+     - name: Check whether a package called flexera agent is installed.
+       debug:
+         msg: "Flexera agent is already  installed"
+       when: "'flexera-agent' in ansible_facts.packages"
+
+     - name: Add to list file if present
+       lineinfile:
+         line: "Hostname: {{ ansible_hostname }}, IP Address: {{ ansible_default_ipv4.address }}"    
+         path: /var/lib/awx/projects/hemanth/infosys/present.csv
+         create: yes
+       delegate_to: localhost    
+       when: "'flexera-agent' in ansible_facts.packages"
+
+     - name: Add to list file if absent
+       lineinfile:
+         line: "Hostname: {{ ansible_hostname }}, IP Address: {{ ansible_default_ipv4.address }}"    
+         path: /var/lib/awx/projects/hemanth/infosys/absent.csv
+         create: yes
+         insertafter: EOF
+       delegate_to: localhost
+       when: "'flexera-agent' not in ansible_facts.packages"
+
+
+       
+      
+

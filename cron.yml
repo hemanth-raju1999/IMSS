@@ -1,0 +1,15 @@
+---
+- name: Defining a cron job
+  hosts: localhost
+  become: true
+  gather_facts: false
+  tasks:
+
+    - name: trail
+      cron:
+        name: running a playbook
+        minute: 1
+        day: 0
+        hour: 0
+        month: 0
+        job: ansible-playbook "/var/lib/awx/projects/hemanth/disk_alert.yml"

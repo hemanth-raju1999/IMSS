@@ -1,0 +1,30 @@
+---
+- name: Check if Qualys agent is installed install if not
+  hosts: test
+  tasks:
+      - name: Check if installed
+        shell: which qualys
+        register: install_check
+        ignore_errors: true
+
+      - name: Print Display
+        debug:
+           msg: "{{install_check}}"
+
+      - name: Install Qualys Cloud Agent
+        yum:
+           name: /var/lib/awx/projects/hemanth/infosys/qualys-cloud-agent.x86_64.rpm
+           state: present
+
+      - name: Check if installed
+        shell: which qualys
+        register: new_install_check
+        ignore_errors: true
+
+      - name: Print Display
+        debug:
+           msg: "{{new_install_check}}"
+
+      #write an download and installation when conditional if not installed
+      #copy the same change shell command to systemctl is-enabled "name of agent"
+

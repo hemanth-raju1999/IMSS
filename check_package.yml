@@ -1,0 +1,32 @@
+--- 
+- name: check
+  hosts: test
+  become: true
+  vars:
+    package_names:
+       - google-chrome-stable
+    
+    packages_rpm_names:
+       - google-chrome-stable_current_x86_64.rpm
+
+  tasks:
+          # - name: Checking and Installing if not present      
+          #block:
+      - name: install check
+        shell: rpm -q "{{ package_names }}"
+        register: result
+        ignore_errors: yes
+        #loop: "{{ package_names  }}" 
+
+      - debug: 
+          msg: "{{ result }}"
+
+      - name: Install if not present
+        yum: 
+          name: "/root/Hemanth/rpm_packages/{{ packages_rpm_names }}"
+          state: latest
+        when: "result.rc == 1"
+        #loop: "{{ packages_rpm_names }}"
+        #loop: "{{ package_names }}" "{{ packages_rpm_names  }}"
+
+

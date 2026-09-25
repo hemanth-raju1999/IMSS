@@ -1,0 +1,31 @@
+---
+- name: Resistring unregistred servers
+  hosts: test
+  become: true
+  gather_facts: true
+  tasks:
+
+    - name: check server status
+      shell: subscription-manager status
+      register: status
+      ignore_errors: yes
+
+    - debug:
+        msg: "{{ status }}"
+
+    - name: Registering the servers
+      shell: |
+             curl -sS --insecure 'https://satellite-server.imss.com:9090/register?activation_keys=RHEL8_key&force=true&hostgroup_id=2&ignore_subman_errors=true&lifecycle_environment_id=2&location_id=2&operatingsystem_id=5&organization_id=1&packages=katello-host-tools+katello-host-tools-tracer+katello-agent&update_packages=false' -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjo0LCJpYXQiOjE2ODc5MzcxMjgsImp0aSI6Ijk3YjY0OGJjYmUzYzEyOTdhNjkwMTRlZGE4YzRkYzE1NTY0MzYxNjg0YTIyYjg4Y2NiZDlmZWU5OTdmOWU0MmEiLCJzY29wZSI6InJlZ2lzdHJhdGlvbiNnbG9iYWwgcmVnaXN0cmF0aW9uI2hvc3QifQ.7I1rQZjweVjpl6nu70etN442EkJb5g7POVb3ShMvH4s' | bash
+      register: result
+      when: status.stdout.find('Current') == -1
+      
+
+    - name: Output message
+      debug:
+        msg: "{{ result.stdout_lines }}"
+      when: status.stdout.find('Current') == -1
+
+        #- name: checking subscription status
+      #shell: subscription-manager status
+      #register: sub_state
+

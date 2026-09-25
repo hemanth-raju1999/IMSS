@@ -1,0 +1,66 @@
+---
+- name: Linux server
+  hosts: test
+  ignore_errors: yes
+  tasks:
+    
+    - name: listing all the rpm packages
+      shell: ls -1 *.rpm
+      args:
+        chdir: /var/lib/awx/projects/hemanth/packages
+      register: rpm_list
+      delegate_to: localhost
+
+    - debug:
+        msg: "{{ rpm_list.stdout_lines }}"
+      
+
+    - name: Copy file to linux server
+      copy:
+        src: "/var/lib/awx/projects/hemanth/packages/{{ item }}"
+        dest: /root/Hemanth/rpm_packages/
+      loop: "{{ rpm_list.stdout_lines }}"
+      register: rpm
+
+    - name: linux copy debug  
+      debug:
+        msg: "{{ rpm }}"  
+
+    - name: Installing RPM packages
+      yum:
+        name: "/root/Hemanth/rpm_packages/{{ item }}"
+        state: latest
+      loop: "{{ rpm_list.stdout_lines }}"
+      when: ansible_distribution == 'RedHat'
+
+- name: ubuntu server
+  hosts: ubuntu
+  ignore_errors: yes
+  tasks:
+
+    - name: listing all the debian packages
+      shell: ls -1 *.deb
+      args:
+        chdir: /var/lib/awx/projects/hemanth/packages
+      register: deb_list
+      delegate_to: localhost
+
+    - debug:
+        msg: "{{ deb_list.stdout_lines }}"
+
+    - name: Copy file to ubantu server
+      copy:
+        src: "/var/lib/awx/projects/hemanth/packages/{{ item }}"
+        dest: /home/imss/deb_packages
+      loop: "{{ deb_list.stdout_lines }}"
+      register: deb
+
+    - name: ubuntu copy debug
+      debug:
+        msg: "{{ deb }}"
+ 
+    - name: Installing DEB packages    
+      apt:
+        deb: "/home/imss/deb_packages/{{ item }}"
+      loop: "{{ deb_list.stdout_lines }}"
+      when: ansible_distribution == 'Ubuntu'

@@ -1,0 +1,59 @@
+---
+ - name: check packages are installed or not
+   hosts: test
+   gather_facts: yes
+   become: yes
+   #become_user: root
+   vars:
+     ansible_sudo_pass: int123$%^
+     #vars_files:
+     #  - files.yml
+
+   tasks:
+     - name: Gather the package facts.
+       ansible.builtin.package_facts:
+              manager: auto
+
+     - name: Print the package facts.
+       ansible.builtin.debug:
+           var: ansible_facts.packages['xagt']
+
+     - name: Check whether a package called Fireeye agent is installed.
+       ansible.builtin.debug:
+             msg: "{{ ansible_facts.packages['xagt'] | length }}  fireeye agent  is already  installed"
+       when: "'xagt' in  ansible_facts.packages"
+
+     - name: Sending the output to txt file.
+       ansible.builtin.shell: |
+             true > /tmp/fire_eye.txt
+             echo  "{{ inventory_hostname }}  fireeye  agent  is already  installed" >> /tmp/fire_eye.txt
+       when: "'xagt' in  ansible_facts.packages"
+       delegate_to: localhost
+
+       #- name: Copying the qualys cloud agent to remote redhat servers.
+       #ansible.builtin.copy:
+       # src: "{{ Qualys_path_rhel }}"
+       # dest: "{{ Qualys_dest }}"
+       #when: ansible_distribution == 'RedHat'
+       #and 'qualys-cloud-agent' is not in  ansible_facts.packages
+   
+     - name: Downloading Fire eye agent
+       shell: |
+              wget http://10.67.200.83/ISG_Tools/FireEyeHX/IMAGE_HX_AGENT_LINUX_29.7.8.tgz
+              tar -zxvf IMAGE_HX_AGENT_LINUX_29.7.8.tgz
+        when: "'xagt' not in  ansible_facts.packages"
+
+     - name: installing Fire eye
+       shell: yum -y install xagt-29.7.8-1.el7.x86_64.rpm && cp agent_config.json  #/opt/fireeye/
+       when: "'xagt' not in  ansible_facts.packages"
+
+     - name: conf. changes
+       shell: /opt/fireeye/bin/xagt -i /opt/fireeye/agent_config.json
+
+     - name: starting agent
+       shell: systemctl start xagt
+       when: ansible_facts['os_family'] == "RedHat" and ansible_facts['']['major_release'] | int = 7
+
+     - name: starting agent
+       shell: service xagt start
+       when: ansible_facts['os_family'] == "RedHat" and ansible_facts['']['major_release'] | int = 6

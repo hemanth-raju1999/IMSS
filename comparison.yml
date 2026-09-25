@@ -1,0 +1,43 @@
+---
+- name: Compare Two Lists from CSV Files and Extract Different and Common Elements
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Read list1 from CSV file
+      set_fact:
+        list1: "{{ lookup('ansible.builtin.file', 'before1.csv').splitlines() }}"
+
+    - name: Read list2 from CSV file
+      set_fact:
+        list2: "{{ lookup('ansible.builtin.file', 'after1.csv').splitlines() }}"
+
+    - name: Find common elements
+      set_fact:
+        common_elements: "{{ list1 | intersect(list2) }}"
+
+    - name: Find different elements
+      set_fact:
+        different_elements: "{{ (list1 + list2) | difference(common_elements) }}"
+
+    - name: Write common elements to CSV file
+      copy:
+        content: "{{ common_elements | join('\n') }}"
+        dest: common_elements.csv
+
+    - name: Write different elements to CSV file
+      copy:
+        content: "{{ different_elements | join('\n') }}"
+        dest: different_elements.csv
+
+    - name: word count of before1.csv
+      shell: wc -l before1.csv  
+      register: wcb1
+
+    - name: word count different_elements.csv
+      shell: wc -l different_elements.csv
+      register: wca1
+
+     - name: Calculate Percentage
+      debug:
+        msg: "The percentage is {{ (wca1 / wcb1) * 100 }}%"

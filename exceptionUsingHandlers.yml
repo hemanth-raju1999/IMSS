@@ -1,0 +1,96 @@
+---
+ - name: check packages are installed or not
+   hosts: test_servers
+   gather_facts: no
+   become: yes
+   serial: 1
+   ignore_errors: yes
+   ignore_unreachable: yes
+
+   tasks:
+
+     - name: Capture unreachable hosts
+       shell: echo "{{ inventory_hostname }}"
+       register: unreachable_host
+
+     - name: Checking for sudo error
+       setup:
+       register: output
+
+ 
+
+     - name: Add to list file if unreachable
+       debug:
+         msg: "Host is unreachable"
+       when: unreachable_host.unreachable == true
+       notify: unreachable
+
+     - name: Add to list file if sudo error
+       debug:
+         msg: "Host has sudo issues"
+       when: "'Missing sudo password' in output.msg"
+       notify: sudoerr     
+
+ 
+     - name: Gather the package facts
+       package_facts:
+         manager: auto
+
+
+     - name: Check whether a package called flexera agent is installed.
+       debug:
+         msg: "Flexera agent is already  installed"
+       when: "'flexera-agent' in ansible_facts.packages" 
+
+     - name: add file if its present
+       debug:
+         msg: "Host has agent"
+       when: "'flexera-agent' in ansible_facts.packages"
+       notify: present
+
+     - name: add file if its absent
+       debug:
+         msg: "Host does not have agent"
+       when: "'flexera-agent' in ansible_facts.packages"
+       notify: absent
+
+ 
+   handlers:
+
+     - name: present
+       lineinfile:
+         line: "Hostname: {{ ansible_hostname }}, IP Address: {{ ansible_default_ipv4.address }}"
+         path: /var/lib/awx/projects/hemanth/infosys/present.csv
+         create: yes
+       delegate_to: localhost
+
+
+ 
+
+     - name: absent
+       lineinfile:
+         line: "Hostname: {{ ansible_hostname }}, IP Address: {{ ansible_default_ipv4.address }}"
+         path: /var/lib/awx/projects/hemanth/infosys/absent.csv
+         create: yes
+         insertafter: EOF
+       delegate_to: localhost
+
+ 
+
+     - name: unreachable
+       lineinfile:
+         line: "Unreachable Host: {{ inventory_hostname }}"
+         path: /var/lib/awx/projects/hemanth/infosys/unreachable.csv
+         create: yes
+         insertafter: EOF
+       delegate_to: localhost
+
+ 
+
+     - name: sudoerr
+       lineinfile:
+         line: "Host: {{ inventory_hostname }} has sudo errors"
+         path: /var/lib/awx/projects/hemanth/infosys/sudoProblem.csv
+         create: yes
+         insertafter: EOF
+       delegate_to: localhost

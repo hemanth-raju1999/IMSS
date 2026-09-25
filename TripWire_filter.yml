@@ -1,0 +1,22 @@
+---
+- name: Create and add content to a file
+  hosts: localhost
+  become: true
+  tasks:
+
+    - name: Running python script
+      shell: python3 /var/lib/awx/projects/hemanth/infosys/testcsvpython.py
+      register: output
+
+    - debug:
+        msg: "{{ output.stdout_lines }}"
+  
+    - name: Reading the Yes Exception data to update database
+      shell: cat /var/lib/awx/projects/hemanth/infosys/TripWire.csv
+      delegate_to: localhost
+      register: csvoutput
+
+    - debug:
+        msg: "{{ csvoutput.stdout_lines}}"
+
+

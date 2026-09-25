@@ -1,0 +1,24 @@
+---
+- name: Deleting from DB
+  hosts: database
+  gather_facts: yes
+  become: true
+
+  tasks: 
+
+    - name: Copy data from SELECT query to/tmp/data.csv in CSV format
+      postgresql_query:
+        db: hemanth
+        query: select * from server_details where to_date(date, 'YYYY/MM/DD') <= current_date - interval '15 day'
+      register: deletinglist
+
+    - debug:
+        var: "{{ deletinglist.query_result }}"
+
+    - name: Deleting the specific rows
+      postgresql_query:
+        db: hemanth  
+        query: DELETE FROM server_details WHERE to_date(date, 'YYYY/MM/DD') <= current_date - interval '15 day'; 
+      delegate_to: 172.16.3.41
+    
+
